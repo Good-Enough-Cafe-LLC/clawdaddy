@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "CommonJS",
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "baseUrl": ".", 
+    "paths": {
+      "@clawdaddy/core": ["core/src/index.ts"]
+    }
+  },
+  "include": ["cli/src/**/*", "serve/src/**/*", "core/src/**/*", "main.ts"]
+}

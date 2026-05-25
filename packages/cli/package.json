@@ -1,0 +1,50 @@
+{
+  "name": "clawdaddy-cli",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "bundle": "esbuild cli.ts --bundle --platform=node --format=cjs --outfile=dist/bundle.cjs --external:@koush/wrtc --external:wrtc",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest watch",
+    "pair": "tsx cli.ts pair",
+    "list": "tsx cli.ts list",
+    "unpair": "tsx cli.ts unpair",
+    "console": "tsx cli.ts console",
+    "api": "tsx cli.ts api",
+    "webdev": "vite",
+    "webbuild": "tsc -p tsconfig.web.json && vite build",
+    "webpreview": "vite preview"
+  },
+  "dependencies": {
+    "@clawdaddy/core": "*",
+    "@koush/wrtc": "^0.5.3",
+    "@noble/hashes": "^2.2.0",
+    "commander": "^14.0.3",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "simple-peer": "^9.11.1",
+    "socket.io-client": "^4.8.3",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/simple-peer": "^9.11.7",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^4.3.1",
+    "@vitest/coverage-v8": "^4.1.5",
+    "autoprefixer": "^10.4.19",
+    "postcss": "^8.4.38",
+    "readable-stream": "^4.5.2",
+    "tailwindcss": "^3.4.3",
+    "tsx": "^4.x.x",
+    "typescript": "^5.x.x",
+    "vite": "^5.2.11",
+    "vite-plugin-node-polyfills": "^0.26.0",
+    "vitest": "^4.1.5"
+  }
+}

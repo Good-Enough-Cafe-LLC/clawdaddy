@@ -1,0 +1,43 @@
+// CLIENT → PHONE (request)
+{
+  type: 'inference'       // future: 'broadcast', 'tts', 'embed', etc.
+  requestId: string,      // uuid, for matching tokens back to requests
+  messages: [             // openai-compatible message array
+    { role: 'system' | 'user' | 'assistant', content: string }
+  ],
+  options?: {             // optional inference params
+    temperature?: number, // default 0.7
+    max_tokens?: number,  // default 1024
+    stream?: boolean,     // default true — false = wait for full response
+  }
+  // TODO: auth token field (phase 2)
+  // TODO: broadcast options (phase 2) - e.g. { type: 'broadcast', topic: 'alerts' }
+}
+
+// PHONE → CLIENT (streaming, one per token)
+{
+  type: 'token',
+  requestId: string,
+  token: string,
+}
+
+// PHONE → CLIENT (final)
+{
+  type: 'done',
+  requestId: string,
+  stats: {
+    tokens: number,
+    ms: number,           // total inference time
+    tps: number,          // tokens per second
+  }
+}
+
+// PHONE → CLIENT (error)
+{
+  type: 'error',
+  requestId: string,
+  error: string,
+  code: 'NO_MODEL' | 'INFERENCE_FAILED' | 'UNAUTHORIZED' | 'BUSY'
+  // TODO: UNAUTHORIZED for when auth is implemented
+  // TODO: BUSY for when phone is already inferring (queue in phase 2?)
+}

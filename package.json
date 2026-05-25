@@ -1,0 +1,11 @@
+{
+  "name": "clawdaddy",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "mobile"
+  ],
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

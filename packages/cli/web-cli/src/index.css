@@ -1,0 +1,62 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  background: #080b0f;
+  color: #e2e8f0;
+  font-family: 'IBM Plex Mono', monospace;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  /* Prevent zoom on input focus on iOS */
+  -webkit-text-size-adjust: 100%;
+  touch-action: pan-x pan-y;
+}
+
+/* Mobile viewport fix for iOS */
+@supports (-webkit-touch-callout: none) {
+  .h-screen {
+    height: 100dvh;
+  }
+}
+
+/* Scrollbars */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #21262d; border-radius: 2px; }
+
+/* Streaming cursor */
+@keyframes cursor-blink { 0%, 100% { opacity: 1 } 50% { opacity: 0 } }
+.cursor {
+  display: inline-block; width: 2px; height: 14px;
+  background: #22c55e; margin-left: 2px; vertical-align: middle;
+  animation: cursor-blink 0.7s infinite;
+}
+
+/* Hide number input spinners */
+input[type='number']::-webkit-inner-spin-button,
+input[type='number']::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type='number'] { -moz-appearance: textfield; }
+
+/* Status dot animations */
+@keyframes blink { 0%, 100% { opacity: 1 } 50% { opacity: 0.3 } }
+.status-connecting { animation: blink 1s infinite; }
+
+/* Mobile touch optimization */
+.touch-manipulation {
+  touch-action: manipulation;
+}
+
+/* Responsive sidebar animation */
+@media (max-width: 767px) {
+  .sidebar-enter {
+    transform: translateX(0);
+  }
+  .sidebar-exit {
+    transform: translateX(-100%);
+  }
+}
+

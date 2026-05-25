@@ -1,0 +1,55 @@
+{
+  "name": "clawdaddy",
+  "version": "1.0.12",
+  "description": "Run and access local LLMs from anywhere over a secure P2P connection",
+  "author": "Good Enough Cafe LLC <contact@goodenoughcafe.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/Good-Enough-Cafe-LLC/clawdaddy-cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Good-Enough-Cafe-LLC/clawdaddy-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Good-Enough-Cafe-LLC/clawdaddy-cli/issues"
+  },
+  "keywords": [
+    "llm",
+    "local-llm",
+    "ollama",
+    "webrtc",
+    "p2p",
+    "ai",
+    "local-ai",
+    "self-hosted",
+    "openai-compatible",
+    "private-ai",
+    "remote-access",
+    "tunneling"
+  ],
+  "bin": {
+    "clawdaddy": "dist/main.js"
+  },
+  "main": "./dist/core/src/index.js",
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "dependencies": {
+    "@koush/wrtc": "^0.5.3",
+    "@noble/hashes": "^2.2.0",
+    "chalk": "^4.1.2",
+    "commander": "^11.0.0",
+    "ollama": "^0.5.0",
+    "simple-peer": "^9.11.1",
+    "socket.io-client": "^4.7.2"
+  },
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "build:web": "cd cli && npm run webbuild",
+    "copy-web": "cp -r cli/dist/web-ui dist/cli/",
+    "prepare-release": "npm run build && npm run build:web && npm run copy-web && chmod +x dist/main.js"
+  },
+  "devDependencies": {
+    "tsc-alias": "^1.8.16"
+  }
+}
