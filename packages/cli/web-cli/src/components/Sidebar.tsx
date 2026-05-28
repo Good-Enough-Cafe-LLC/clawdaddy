@@ -68,9 +68,9 @@ export default function Sidebar({ rtc, isMobile, onCloseSidebar }: Props) {
     } else {
       const id = nodeIdRef.current?.value.trim() || ''
       const code = rtcCodeRef.current?.value.trim() || ''
-      const cid = clientIdRef.current?.value.trim() || undefined  // ← add
+      const cid = clientIdRef.current?.value.trim() || undefined 
       if (!id || !code) { addLog('Enter node ID and pairing code', 'error'); return }
-      rtc.connect(id, code, cid)  // ← pass through
+      rtc.connect(id, code, cid)
     }
   }
 
