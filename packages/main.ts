@@ -20,7 +20,7 @@ const program = new Command();
 program
   .name('clawdaddy')
   .description('P2P tunnel for local LLMs')
-  .version('1.0.12');
+  .version('1.0.13');
 
 function printHelp(): void {
   console.log(`

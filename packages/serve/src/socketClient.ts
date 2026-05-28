@@ -1,7 +1,7 @@
-import { io } from 'socket.io-client';
-import { createWebRTC } from './webrtcProvider';
-import { deriveSharedKey, computeAuthHash } from '@clawdaddy/core';
-import { getConfig } from './config';
+import { io } from "socket.io-client";
+import { createWebRTC } from "./webrtcProvider";
+import { deriveSharedKey, computeAuthHash } from "@clawdaddy/core";
+import { getConfig } from "./config";
 
 const RECONNECT_BASE_MS = getConfig().reconnectBaseMs;
 const RECONNECT_MAX_MS = getConfig().reconnectMaxMs;
@@ -12,7 +12,11 @@ export interface SocketClientOptions {
   pairingCode: string;
   onConnect: () => void;
   onDisconnect: () => void;
-  onTunnelOpen: (socketRef: any, authHashRef: string, sharedKeyRef: string) => void;
+  onTunnelOpen: (
+    socketRef: any,
+    authHashRef: string,
+    sharedKeyRef: string,
+  ) => void;
   onTunnelClose: () => void;
   onPacket?: (packet: any, send: (p: any) => void) => void;
   log: (msg: string, type?: string) => void;
@@ -48,8 +52,14 @@ export function createSocketClient(options: SocketClientOptions) {
   const scheduleReconnect = () => {
     if (destroyed || reconnectTimer) return;
     reconnectAttempt++;
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt), RECONNECT_MAX_MS);
-    log(`Reconnecting in ${Math.round(delay / 1000)}s... (attempt ${reconnectAttempt})`, 'info');
+    const delay = Math.min(
+      RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt),
+      RECONNECT_MAX_MS,
+    );
+    log(
+      `Reconnecting in ${Math.round(delay / 1000)}s... (attempt ${reconnectAttempt})`,
+      "info",
+    );
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!destroyed) connect();
@@ -57,47 +67,69 @@ export function createSocketClient(options: SocketClientOptions) {
   };
 
   const teardown = () => {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     // Close all session peers
     for (const [sessionId, peer] of sessionPeers.entries()) {
-      try { peer.close(); } catch (_) { }
+      try {
+        peer.close();
+      } catch (_) {}
       sessionPeers.delete(sessionId);
     }
-    if (rtc) { try { rtc.close(); } catch (_) { } rtc = null; }
-    if (socket) { try { socket.disconnect(); } catch (_) { } socket = null; }
+    if (rtc) {
+      try {
+        rtc.close();
+      } catch (_) {}
+      rtc = null;
+    }
+    if (socket) {
+      try {
+        socket.disconnect();
+      } catch (_) {}
+      socket = null;
+    }
   };
 
   // ── Handle a new client session ─────────────────────────────────────────────
   // Called when the switchboard notifies us a client wants to connect.
   // Each session gets its own WebRTC peer; signals are routed by sessionId.
-  const handleClientSession = (sock: ReturnType<typeof io>, sessionId: string) => {
-    log(`📲 Incoming client session: ${sessionId.slice(0, 8)}...`, 'info');
+  // Replace handleClientSession function (around line 101):
+  const handleClientSession = (
+    sock: ReturnType<typeof io>,
+    sessionId: string,
+  ) => {
+    log(`📲 Incoming client session: ${sessionId.slice(0, 8)}...`, "info");
 
     if (shouldCreateWebRTC) {
-      // Single-peer mode: only support one client at a time
+      // Single-peer mode: create WebRTC here
       if (rtc) {
-        log('⚠️ Single-peer mode: closing existing peer for new session', 'info');
-        try { rtc.close(); } catch (_) { }
+        log(
+          "⚠️ Single-peer mode: closing existing peer for new session",
+          "info",
+        );
+        try {
+          rtc.close();
+        } catch (_) {}
         rtc = null;
       }
 
       rtc = createWebRTC({
         socket: sock,
-        sessionId,      // ← pass through so webrtcProvider can include it on signals
+        sessionId,
         authHash,
         sharedKey,
-        role: 'receiver',
+        role: "receiver",
         log,
         onOpen: () => {
-          log('🔓 P2P tunnel open — client connected!', 'success');
+          log("🔓 P2P tunnel open — client connected!", "success");
           onTunnelOpen(sock, authHash, sharedKey);
         },
         onClose: () => {
-          log('🔒 P2P tunnel closed.', 'error');
+          log("🔒 P2P tunnel closed.", "error");
           onTunnelClose();
           rtc = null;
-          // Don't full teardown/reconnect on peer close — stay registered
-          // on the switchboard so new clients can connect
         },
         onData: (packet) => {
           if (onPacket && rtc) {
@@ -106,32 +138,13 @@ export function createSocketClient(options: SocketClientOptions) {
         },
       });
     } else {
-      // Multi-peer mode: create one peer per session, hand session map to caller
-      const peer = createWebRTC({
-        socket: sock,
-        sessionId,
-        authHash,
-        sharedKey,
-        role: 'receiver',
-        log,
-        onOpen: () => {
-          log(`🔓 Peer connected (session: ${sessionId.slice(0, 8)}...)`, 'success');
-          onTunnelOpen(sock, authHash, sharedKey);
-        },
-        onClose: () => {
-          log(`🔒 Peer closed (session: ${sessionId.slice(0, 8)}...)`, 'error');
-          sessionPeers.delete(sessionId);
-          onTunnelClose();
-        },
-        onData: (packet) => {
-          if (onPacket) {
-            onPacket(packet, peer.send);
-          }
-        },
-      });
-
-      sessionPeers.set(sessionId, peer);
-      log(`Multi-peer mode: session ${sessionId.slice(0, 8)}... handed to PeerManager`, 'info');
+      // Multi-peer mode: DO NOTHING - MultiPeerManager handles everything
+      log(
+        `Multi-peer mode: session ${sessionId.slice(0, 8)}... will be handled by PeerManager`,
+        "info",
+      );
+      // Just notify that a session is available - PeerManager already knows from its own socket listener
+      onTunnelOpen(sock, authHash, sharedKey); // This passes socket to PeerManager
     }
   };
 
@@ -139,90 +152,100 @@ export function createSocketClient(options: SocketClientOptions) {
     teardown();
     if (destroyed) return;
 
-    log('Connecting to switchboard as server node...', 'info');
+    log("Connecting to switchboard as server node...", "info");
 
-    const sock = io(url, { transports: ['websocket'], reconnection: false });
+    const sock = io(url, { transports: ["websocket"], reconnection: false });
     socket = sock;
 
-    sock.on('connect', () => {
+    sock.on("connect", () => {
       reconnectAttempt = 0;
 
       // Register as a persistent server node
-      sock.emit('register', {
-        role:     'server',
+      sock.emit("register", {
+        role: "server",
         serverId: hostId,
         authHash,
       });
     });
 
     // ── Wait for switchboard to confirm server registration ─────────────────
-    sock.on('registered', ({ role, serverId }: { role: string; serverId: string }) => {
-      if (role !== 'server') return;
-      log(`✅ Registered as server node: ${serverId}`, 'success');
-      onConnect();
+    sock.on(
+      "registered",
+      ({ role, serverId }: { role: string; serverId: string }) => {
+        if (role !== "server") return;
+        log(`✅ Registered as server node: ${serverId}`, "success");
+        onConnect();
 
-      if (!shouldCreateWebRTC) {
-        // Multi-peer mode: socket is ready, PeerManager will use it
-        log('Multi-peer mode: WebRTC will be managed by PeerManager', 'info');
-        onTunnelOpen(sock, authHash, sharedKey);
-      }
-      // In single-peer mode we wait for client_session before creating WebRTC
-    });
+        if (!shouldCreateWebRTC) {
+          // Multi-peer mode: socket is ready, PeerManager will use it
+          log("Multi-peer mode: WebRTC will be managed by PeerManager", "info");
+          onTunnelOpen(sock, authHash, sharedKey);
+        }
+        // In single-peer mode we wait for client_session before creating WebRTC
+      },
+    );
 
     // ── New client wants to connect ─────────────────────────────────────────
     // Switchboard sends this when a client successfully registers against us
-    sock.on('client_session', ({ sessionId }: { sessionId: string }) => {
+    sock.on("client_session", ({ sessionId }: { sessionId: string }) => {
       handleClientSession(sock, sessionId);
     });
 
     // ── Inbound signals from clients ────────────────────────────────────────
     // Forwarded by the switchboard; sessionId tells us which peer to route to
-    sock.on('signal', ({ sessionId, signalData }: { sessionId: string; signalData: any }) => {
-      if (shouldCreateWebRTC) {
-        // Single-peer mode: signal goes to the one rtc instance
-        if (rtc) {
-          (rtc as any).receiveSignal?.(signalData);
-        } else {
-          log(`⚠️ Received signal for session ${sessionId.slice(0, 8)}... but no peer exists yet`, 'error');
+    sock.on(
+      "signal",
+      ({ sessionId, signalData }: { sessionId: string; signalData: any }) => {
+        if (shouldCreateWebRTC) {
+          // Single-peer mode: route to the single RTC instance
+          if (rtc) {
+            (rtc as any).receiveSignal?.(signalData);
+          } else {
+            log(
+              `⚠️ Received signal for session ${sessionId.slice(0, 8)}... but no peer exists yet`,
+              "error",
+            );
+          }
         }
-      } else {
-        // Multi-peer mode: route to the right session peer
-        const peer = sessionPeers.get(sessionId);
-        if (peer) {
-          (peer as any).receiveSignal?.(signalData);
-        } else {
-          log(`⚠️ No peer found for session ${sessionId.slice(0, 8)}...`, 'error');
-        }
-      }
-    });
+        // Multi-peer mode: IGNORE - MultiPeerManager handles signals directly
+        // The signal handler in MultiPeerManager already processes these
+      },
+    );
 
     // ── Client disconnected mid-handshake ───────────────────────────────────
-    sock.on('client_disconnected', ({ sessionId }: { sessionId: string }) => {
-      log(`⚠️ Client disconnected: session ${sessionId.slice(0, 8)}...`, 'info');
+    sock.on("client_disconnected", ({ sessionId }: { sessionId: string }) => {
+      log(
+        `⚠️ Client disconnected: session ${sessionId.slice(0, 8)}...`,
+        "info",
+      );
       const peer = sessionPeers.get(sessionId);
       if (peer) {
-        try { peer.close(); } catch (_) { }
+        try {
+          peer.close();
+        } catch (_) {}
         sessionPeers.delete(sessionId);
       }
       if (shouldCreateWebRTC && rtc) {
-        try { rtc.close(); } catch (_) { }
+        try {
+          rtc.close();
+        } catch (_) {}
         rtc = null;
       }
     });
 
     // ── Switchboard-level errors ────────────────────────────────────────────
-    sock.on('error', ({ code, message }: { code: string; message: string }) => {
-      log(`❌ Switchboard error [${code}]: ${message}`, 'error');
+    sock.on("error", ({ code, message }: { code: string; message: string }) => {
+      log(`❌ Switchboard error [${code}]: ${message}`, "error");
     });
 
-    sock.on('disconnect', (reason: any) => {
-      log(`Switchboard disconnected: ${reason}`, 'error');
+    sock.on("disconnect", (reason: any) => {
+      log(`Switchboard disconnected: ${reason}`, "error");
       onDisconnect();
       scheduleReconnect();
     });
 
-    sock.on('connect_error', (e: { message: any }) => {
-      log(`Switchboard error: ${e.message}`, 'error');
+    sock.on("connect_error", (e: { message: any }) => {
+      log(`Switchboard error: ${e.message}`, "error");
       teardown();
       scheduleReconnect();
     });

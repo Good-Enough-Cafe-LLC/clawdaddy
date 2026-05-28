@@ -70,7 +70,7 @@ const program = new Command();
 program
     .name('clawdaddy-serve')
     .description('Serve any Ollama model from your machine, accessible from anywhere')
-    .version('1.0.12')
+    .version('1.0.13')
     .usage('[options] [command]')
     .exitOverride((err) => {
         if (err.code?.startsWith('commander.')) {

@@ -82,7 +82,7 @@ async function connectLocalAndRun(
 program
     .name('Clawdaddy')
     .description('P2P tunnel for local LLMs')
-    .version('1.0.12')
+    .version('1.0.13')
     .exitOverride((err) => {
         if (err.code?.startsWith('commander.')) {
             const cmdName   = process.argv[2];

@@ -1,6 +1,6 @@
 {
   "name": "clawdaddy",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Run and access local LLMs from anywhere over a secure P2P connection",
   "author": "Good Enough Cafe LLC <contact@goodenoughcafe.com>",
   "license": "MIT",

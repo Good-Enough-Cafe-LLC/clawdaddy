@@ -1,6 +1,6 @@
 {
   "name": "clawdaddy-serve",
-  "version": "1.0.12",
+  "version": "1.0.13",
   "description": "Serve any LLM from your machine, accessible from anywhere via WebRTC",
   "bin": {
     "clawdaddy-serve": "./dist/index.js"
