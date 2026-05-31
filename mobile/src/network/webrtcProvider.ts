@@ -1,3 +1,4 @@
+// webrtcProvider.ts - Complete working version
 import {
   RTCPeerConnection,
   RTCIceCandidate,
@@ -8,116 +9,157 @@ import {
   verifyHMAC,
   reassemble,
   ChunkFrame,
+  MAX_SERIALIZED_SIZE,
+  CHUNK_SIZE,
 } from '@clawdaddy/core';
 
-// ─── createWebRTC ─────────────────────────────────────────────────────────────
-//
-// Mobile is always the SERVER / RECEIVER role:
-//   - Registers with the switchboard as a server node (done in socketClient.ts)
-//   - Receives client_session events when a client wants to connect
-//   - Receives offers via the signal event and sends answers back
-//   - All signals are routed by sessionId — no targetId or authHash on signals
-//
-// One WebRTC instance is created per client session. The socketClient creates
-// a new instance each time a client_session arrives.
+type RTCDataChannel = any;
+
+const reassemblyBuffers = new Map<string, Map<number, string>>();
+
+function processChunk(frame: ChunkFrame): string | null {
+  let buffer = reassemblyBuffers.get(frame.id);
+  if (!buffer) {
+    buffer = new Map();
+    reassemblyBuffers.set(frame.id, buffer);
+  }
+  buffer.set(frame.index, frame.data);
+  
+  if (buffer.size === frame.total) {
+    let result = '';
+    for (let i = 0; i < frame.total; i++) result += buffer.get(i);
+    reassemblyBuffers.delete(frame.id);
+    return result;
+  }
+  return null;
+}
+
+const generateSimpleUUID = (): string => {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
 
 export const createWebRTC = ({
   socket,
-  authHash,
   sharedKey,
+  sessionId,
   onData,
   onOpen,
   onClose,
   log,
 }: {
   socket: any;
-  authHash: string;
   sharedKey: string;
+  sessionId: string;
   onData: (data: any) => void;
   onOpen: () => void;
   onClose: () => void;
   log: (msg: string, type?: any) => void;
 }) => {
-  const pc = new RTCPeerConnection({
+  let pc: RTCPeerConnection | null = null;
+  let dataChannel: RTCDataChannel | null = null;
+  let isConnected = false;
+  let isClosed = false;
+
+  log(`📱 Creating WebRTC receiver for session ${sessionId.slice(0, 8)}...`, 'info');
+
+  pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+      { urls: 'stun:stun4.l.google.com:19302' },
     ],
   });
 
-  // Use 'any' type for data channel since RTCDataChannel isn't exported
-  let dataChannel: any = null;
-  let isConnected = false;
-  let currentSession: string | null = null; // sessionId of the connected client
-
+  // Send ICE candidates
   pc.addEventListener('icecandidate', (event: any) => {
-    const candidate = event.candidate;
-    if (!candidate || !currentSession) return;
-    socket.emit('signal', {
-      sessionId: currentSession,
-      signalData: { candidate: candidate.toJSON() },
-    });
-  });
-
-  pc.addEventListener('connectionstatechange', () => {
-    log(`Connection state: ${pc.connectionState}`);
-    if (pc.connectionState === 'connected') {
-      if (!isConnected) {
-        isConnected = true;
-        onOpen();
-      }
-    } else if (
-      pc.connectionState === 'disconnected' ||
-      pc.connectionState === 'failed'
-    ) {
-      if (isConnected) {
-        isConnected = false;
-        onClose();
-      }
-      currentSession = null;
+    if (event.candidate && !isClosed && sessionId) {
+      log(`❄️ Sending ICE candidate`, 'info');
+      socket.emit('signal', {
+        sessionId,
+        signalData: { candidate: event.candidate },
+      });
     }
   });
 
-  pc.addEventListener('datachannel', (event: any) => {
-    log('📨 Incoming data channel');
-    dataChannel = event.channel;
-    setupDataChannel(event.channel);
+  // Log ICE connection state
+  pc.addEventListener('iceconnectionstatechange', () => {
+    if (pc) {
+      const state = pc.iceConnectionState;
+      log(`❄️ ICE state: ${state}`, 'info');
+      if (state === 'connected') {
+        log('✅ ICE connected!', 'success');
+      } else if (state === 'failed') {
+        log('❌ ICE failed', 'error');
+      }
+    }
   });
 
-  const setupDataChannel = (channel: any) => {
-    // Chunk reassembly buffer — matches the frame format used by @clawdaddy/core
-    channel.onmessage = ({ data }: any) => {
+  // Handle connection state
+  pc.addEventListener('connectionstatechange', () => {
+    if (pc) {
+      const state = pc.connectionState;
+      log(`🔌 Connection state: ${state}`, 'info');
+      if (state === 'connected' && !isConnected && !isClosed) {
+        isConnected = true;
+        log('🎉 WebRTC connected!', 'success');
+        onOpen();
+      }
+    }
+  });
+
+  // Handle incoming data channel (client will create it)
+  pc.addEventListener('datachannel', (event: any) => {
+    log('📨 Data channel received!', 'success');
+    const channel = event.channel;
+    
+    // Setup the data channel
+    channel.onopen = () => {
+      log('🔓 Data channel open', 'success');
+      if (!isConnected && !isClosed) {
+        isConnected = true;
+        onOpen();
+      }
+    };
+    
+    channel.onclose = () => {
+      log('🔒 Data channel closed', 'info');
+      if (isConnected && !isClosed) {
+        isConnected = false;
+        onClose();
+      }
+    };
+    
+    channel.onerror = (error: any) => {
+      log(`❌ Data channel error: ${error.message}`, 'error');
+    };
+    
+    channel.onmessage = (event: any) => {
       try {
-        const raw = typeof data === 'string' ? data : data.toString();
+        const raw = event.data.toString();
         const parsed = JSON.parse(raw);
-
-        // ── Chunk frame path ──────────────────────────────────────────────
-        if (
-          typeof parsed.id === 'string' &&
-          typeof parsed.index === 'number' &&
-          typeof parsed.total === 'number'
-        ) {
-          const serialised = reassemble(parsed as ChunkFrame);
-          if (serialised === null) return; // still waiting for more chunks
-
+        
+        if (parsed.id && typeof parsed.index === 'number') {
+          const serialised = processChunk(parsed);
+          if (!serialised) return;
           const packet = JSON.parse(serialised);
-
           if (packet.signature && packet.payload) {
             if (!verifyHMAC(sharedKey, packet.payload, packet.signature)) {
-              log('❌ HMAC verification failed', 'error');
+              log('❌ HMAC failed', 'error');
               return;
             }
             onData(packet.payload);
           } else {
             onData(packet);
           }
-          return;
-        }
-
-        // ── Legacy / non-chunked path (backwards compat) ──────────────────
-        if (parsed.signature && parsed.payload) {
+        } else if (parsed.signature && parsed.payload) {
           if (!verifyHMAC(sharedKey, parsed.payload, parsed.signature)) {
-            log('❌ HMAC verification failed (legacy packet)', 'error');
+            log('❌ HMAC failed', 'error');
             return;
           }
           onData(parsed.payload);
@@ -125,83 +167,123 @@ export const createWebRTC = ({
           onData(parsed);
         }
       } catch (e) {
-        log(`❌ Malformed packet: ${String(e)}`, 'error');
+        log(`❌ Message error: ${e}`, 'error');
       }
     };
+    
+    dataChannel = channel;
+  });
 
-    channel.onopen = () => {
-      log('🔓 Data channel opened');
-      if (!isConnected) {
-        isConnected = true;
-        onOpen();
-      }
-    };
-
-    channel.onclose = () => {
-      log('🔒 Data channel closed');
-      if (isConnected) {
-        isConnected = false;
-        onClose();
-      }
-      currentSession = null;
-    };
-  };
-
-  // ── Inbound signals ───────────────────────────────────────────────────────
-  // Switchboard forwards signals from the client as { sessionId, signalData }.
-  // We store the sessionId on the first offer so we know where to route
-  // our answer and ICE candidates.
-  const handleSignal = async ({ sessionId, signalData }: any) => {
+  // Signal method for MultiPeerManager to call
+  const signal = async (signalData: any) => {
     try {
       if (signalData.type === 'offer') {
-        currentSession = sessionId;
-        log(`📞 Offer received (session: ${sessionId.slice(0, 8)}...)`, 'info');
-
-        await pc.setRemoteDescription(new RTCSessionDescription(signalData));
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        log(`📞 Sending answer (session: ${sessionId.slice(0, 8)}...)`, 'info');
-        socket.emit('signal', { sessionId, signalData: answer });
+        log(`📞 Received offer, creating answer...`, 'info');
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(signalData));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          log(`📞 Sending answer`, 'info');
+          socket.emit('signal', { sessionId, signalData: answer });
+        }
       } else if (signalData.candidate) {
-        await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+        log(`❄️ Adding ICE candidate`, 'info');
+        if (pc) {
+          await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
+        }
       }
-    } catch (e) {
-      log(`❌ Signal error: ${String(e)}`, 'error');
+    } catch (e: any) {
+      log(`❌ Signal error: ${e.message}`, 'error');
     }
   };
 
-  socket.on('signal', handleSignal);
+  // Send function with proper error handling
+  // Replace the send function in webrtcProvider.ts with this debugging version:
 
-  // ── Send ──────────────────────────────────────────────────────────────────
-  // Wraps outgoing packets in an HMAC-signed envelope.
-  // No chunking on the send side — react-native-webrtc handles larger messages
-  // natively and the CLI/web reassembler will handle chunks if we add them later.
-  const send = (packet: any) => {
-    if (dataChannel?.readyState !== 'open') {
-      log('⚠️ Cannot send: data channel not open', 'error');
-      return;
+const send = (packet: any) => {
+  log(`📤 send() called`, 'info');
+  
+  if (!dataChannel) {
+    log('❌ dataChannel is null', 'error');
+    return;
+  }
+  
+  // Log everything about the dataChannel object
+  log(`📊 dataChannel keys: ${Object.keys(dataChannel).join(', ')}`, 'info');
+  log(`📊 dataChannel prototype keys: ${Object.keys(Object.getPrototypeOf(dataChannel)).join(', ')}`, 'info');
+  log(`📊 dataChannel.readyState: ${dataChannel.readyState}`, 'info');
+  log(`📊 typeof dataChannel.send: ${typeof dataChannel.send}`, 'info');
+  log(`📊 dataChannel._send: ${typeof dataChannel._send}`, 'info');
+  log(`📊 dataChannel.sendMessage: ${typeof dataChannel.sendMessage}`, 'info');
+  
+  // Try different possible method names
+  let sendMethod = null;
+  
+  if (typeof dataChannel.send === 'function') {
+    sendMethod = dataChannel.send;
+    log('✅ Using dataChannel.send', 'info');
+  } else if (typeof dataChannel._send === 'function') {
+    sendMethod = dataChannel._send;
+    log('✅ Using dataChannel._send', 'info');
+  } else if (typeof dataChannel.sendMessage === 'function') {
+    sendMethod = dataChannel.sendMessage;
+    log('✅ Using dataChannel.sendMessage', 'info');
+  } else if (typeof dataChannel.sendData === 'function') {
+    sendMethod = dataChannel.sendData;
+    log('✅ Using dataChannel.sendData', 'info');
+  }
+  
+  if (!sendMethod) {
+    log('❌ No send method found on dataChannel!', 'error');
+    // Try to see if there's any function on the object
+    for (const key of Object.keys(dataChannel)) {
+      if (typeof dataChannel[key] === 'function') {
+        log(`   Found function: ${key}`, 'info');
+      }
     }
-
+    return;
+  }
+  
+  // Bind the method to the dataChannel object
+  const boundSend = sendMethod.bind(dataChannel);
+  
+  try {
     const signature = computeHMAC(sharedKey, packet);
     const securePacket = { payload: packet, signature };
-    dataChannel.send(JSON.stringify(securePacket));
-  };
-
-  // ── Cleanup ───────────────────────────────────────────────────────────────
-  const close = () => {
-    socket.off('signal', handleSignal);
-    if (dataChannel) {
-      try {
-        dataChannel.close();
-      } catch (_) {}
-      dataChannel = null;
+    const serialised = JSON.stringify(securePacket);
+    const id = generateSimpleUUID();
+    const total = Math.ceil(serialised.length / CHUNK_SIZE);
+    
+    log(`📤 Sending ${total} chunks, total size: ${serialised.length} bytes`, 'info');
+    
+    for (let i = 0; i < total; i++) {
+      const frame = {
+        id,
+        index: i,
+        total,
+        data: serialised.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+      };
+      boundSend(JSON.stringify(frame));
     }
-    try {
-      pc.close();
-    } catch (_) {}
-    currentSession = null;
+    
+    log(`✅ Packet sent successfully`, 'success');
+  } catch (err: any) {
+    log(`❌ Send error: ${err.message}`, 'error');
+    log(`   Stack: ${err.stack}`, 'error');
+  }
+};
+
+  const close = () => {
+    if (isClosed) return;
+    isClosed = true;
+    if (dataChannel) {
+      try { dataChannel.close(); } catch (_) {}
+    }
+    if (pc) {
+      try { pc.close(); } catch (_) {}
+    }
+    isConnected = false;
   };
 
-  return { pc, send, close };
+  return { send, signal, close };
 };

@@ -1,9 +1,10 @@
+// socketClient.ts - Complete rewrite to match npm server
 import { io } from 'socket.io-client';
-import { createWebRTC } from './webrtcProvider';
+import { MultiPeerManager } from './multiPeerManager';
 import { deriveSharedKey, computeAuthHash } from '@clawdaddy/core';
 
 const RECONNECT_BASE_MS = 2000;
-const RECONNECT_MAX_MS  = 30000;
+const RECONNECT_MAX_MS = 30000;
 
 const normalizePhoneId = (id: string): string => id.trim().toUpperCase();
 const normalizePairingCode = (code: string): string => {
@@ -25,32 +26,32 @@ export const createSocketClient = ({
   onTunnelClose,
   log,
 }: {
-  url:           string;
-  phoneId:       string;
-  pairingCode:   string;
-  onPacket:      (packet: any, send: (p: any) => void) => void;
-  onConnect:     () => void;
-  onDisconnect:  () => void;
-  onTunnelOpen:  () => void;
-  onTunnelClose: () => void;
-  log:           (msg: string, type?: any) => void;
+  url: string;
+  phoneId: string;
+  pairingCode: string;
+  onPacket: (packet: any, send: (p: any) => void, sessionId?: string) => void;
+  onConnect: () => void;
+  onDisconnect: () => void;
+  onTunnelOpen: (sessionId: string) => void;
+  onTunnelClose: (sessionId: string) => void;
+  log: (msg: string, type?: any) => void;
 }) => {
-  let socket:          ReturnType<typeof io> | null = null;
-  let rtc:             ReturnType<typeof createWebRTC> | null = null;
-  let destroyed        = false;
-  let reconnectTimer:  any = null;
+  let socket: ReturnType<typeof io> | null = null;
+  let peerManager: MultiPeerManager | null = null;
+  let destroyed = false;
+  let reconnectTimer: any = null;
   let reconnectAttempt = 0;
 
-  const normalizedPhoneId    = normalizePhoneId(phoneId);
+  const normalizedPhoneId = normalizePhoneId(phoneId);
   const normalizedPairingCode = normalizePairingCode(pairingCode);
 
   const sharedKey = deriveSharedKey(normalizedPairingCode, normalizedPhoneId);
-  const authHash  = computeAuthHash(sharedKey);
+  const authHash = computeAuthHash(sharedKey);
 
   log('🔐 SERVER DEBUG:');
-  log(`   Server ID:    ${normalizedPhoneId}`);
-  log(`   Pairing Code: ${normalizedPairingCode}`);
-  log(`   Auth Hash:    ${authHash.slice(0, 16)}...`);
+  log(`   Server ID:     ${normalizedPhoneId}`);
+  log(`   Pairing Code:  ${normalizedPairingCode}`);
+  log(`   Auth Hash:     ${authHash.slice(0, 16)}...`);
 
   const scheduleReconnect = () => {
     if (destroyed || reconnectTimer) return;
@@ -65,77 +66,73 @@ export const createSocketClient = ({
 
   const teardown = () => {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (rtc)    { try { rtc.close();            } catch (_) { } rtc    = null; }
-    if (socket) { try { socket.disconnect();    } catch (_) { } socket = null; }
+    if (peerManager) {
+      try { peerManager.close(); } catch (_) { }
+      peerManager = null;
+    }
+    if (socket) {
+      try { socket.disconnect(); } catch (_) { }
+      socket = null;
+    }
   };
 
   const connect = () => {
     teardown();
     if (destroyed) return;
 
-    log('Connecting to switchboard...', 'info');
+    log('Connecting to switchboard as server node...', 'info');
 
     const sock = io(url, { transports: ['websocket'], reconnection: false });
     socket = sock;
 
     sock.on('connect', () => {
       reconnectAttempt = 0;
-
-      // Register as a SERVER node (broadcaster)
+      log('✅ Connected to switchboard', 'success');
+      
       sock.emit('register', {
-        role:     'server',
+        role: 'server',
         serverId: normalizedPhoneId,
         authHash,
       });
-
       log(`📱 Registering as server: ${normalizedPhoneId}`, 'info');
     });
 
-    // Wait for switchboard confirmation before setting up WebRTC
     sock.on('registered', ({ role, serverId }: { role: string; serverId: string }) => {
       if (role !== 'server') return;
       log(`✅ Registered as server: ${serverId}`, 'success');
       onConnect();
 
-      // Phone is always the receiver — it waits for offers from clients
-      rtc = createWebRTC({
+      // Create MultiPeerManager to handle incoming connections
+      log(`📡 Creating MultiPeerManager with max connections: 5`, 'info');
+      peerManager = new MultiPeerManager({
         socket: sock,
         authHash,
         sharedKey,
-        role: 'receiver',  // Server receives connections
+        maxConnections: 5,
         log,
-        onOpen: () => {
-          log('🔓 P2P tunnel open — client connected!', 'success');
-          onTunnelOpen();
-        },
-        onClose: () => {
-          log('🔒 P2P tunnel closed.', 'error');
-          onTunnelClose();
-          rtc = null;
-        },
-        onData: (packet) => {
-          if (rtc) onPacket(packet, rtc.send);
-        },
+      });
+
+      // Forward peer events to the app
+      peerManager.on('peer-connected', (sessionId: string) => {
+        log(`🔓 Client connected: ${sessionId.slice(0, 8)}...`, 'success');
+        onTunnelOpen(sessionId);
+      });
+
+      peerManager.on('peer-disconnected', (sessionId: string) => {
+        log(`🔒 Client disconnected: ${sessionId.slice(0, 8)}...`, 'info');
+        onTunnelClose(sessionId);
+      });
+
+      peerManager.on('peer-data', (sessionId: string, data: any) => {
+        // Wrap onPacket with a send function bound to this session
+        onPacket(data, (packet: any) => {
+          peerManager?.sendToPeer(sessionId, packet);
+        }, sessionId);
       });
     });
 
-    // Handle incoming client sessions
-    sock.on('client_session', ({ sessionId }: { sessionId: string }) => {
-      log(`📲 Client connecting: ${sessionId.slice(0, 8)}...`, 'info');
-      // WebRTC will handle the connection via signals
-    });
-
-    // Handle signals from clients
-    sock.on('signal', ({ sessionId, signalData }: { sessionId: string; signalData: any }) => {
-      if (rtc) {
-        (rtc as any).receiveSignal?.(signalData);
-      }
-    });
-
-    // Switchboard-level errors
     sock.on('error', ({ code, message }: { code: string; message: string }) => {
       log(`❌ Switchboard [${code}]: ${message}`, 'error');
-      // Validation errors won't fix themselves — stop retrying
       if (code === 'VALIDATION' || code === 'CAPACITY') {
         teardown();
         destroyed = true;
@@ -162,8 +159,19 @@ export const createSocketClient = ({
       destroyed = true;
       teardown();
     },
-    send: (packet: any) => {
-      if (rtc) rtc.send(packet);
+    send: (packet: any, sessionId?: string) => {
+      if (peerManager) {
+        if (sessionId) {
+          peerManager.sendToPeer(sessionId, packet);
+        } else {
+          // Send to first peer if no session specified
+          const peers = peerManager.getPeers();
+          if (peers.length > 0) {
+            peerManager.sendToPeer(peers[0], packet);
+          }
+        }
+      }
     },
+    getPeerManager: () => peerManager,
   };
 };

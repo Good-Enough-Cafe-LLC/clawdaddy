@@ -29,6 +29,7 @@ import {
   ClientSession
 } from './src/session/sessionManager';
 import { estimateTokens } from './src/session/tokenEstimator';
+import { registerGlobals } from 'react-native-webrtc';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const DEFAULT_SIGNAL_SERVER = 'https://clawdaddyswitch01.goodenoughcafe.com';
@@ -94,6 +95,14 @@ const BUILTIN_MODES: Mode[] = [
   },
 ];
 
+
+registerGlobals();
+
+// Standardize a global 'location' variable if missing (some libraries require it)
+if (!global.location) {
+  (global as any).location = { protocol: 'https:' };
+}
+
 // ─── App ──────────────────────────────────────────────────────────────────────
 const App = () => {
 
@@ -151,7 +160,7 @@ const App = () => {
 
   // Logs
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [showLogs, setShowLogs] = useState(false);
+  const [showLogs, setShowLogs] = useState(true);
   const logScrollRef = useRef<ScrollView>(null);
 
   // Animations
@@ -1184,7 +1193,7 @@ const s = StyleSheet.create({
   header: { alignItems: 'center', paddingTop: 44, paddingBottom: 6 },
   logo: { fontSize: 38, marginBottom: 4 },
   title: { fontSize: 24, fontWeight: '900', color: '#ef4444', letterSpacing: 8 },
-  subtitle: { fontSize: 10, color: '#52525b', letterSpacing: 4, marginTop: 2, textTransform: 'uppercase' },
+  subtitle: { fontSize: 10, color: '#a1a1aa', letterSpacing: 4, marginTop: 2, textTransform: 'uppercase' },
 
   pageIndicator: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, paddingVertical: 10 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#52525b' },
@@ -1207,7 +1216,7 @@ const s = StyleSheet.create({
   statusDot: { width: 9, height: 9, borderRadius: 5 },
   statusText: { color: '#d4d4d8', fontSize: 13 },
   idRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18, paddingHorizontal: 2 },
-  idLabel: { color: '#a1a1aa', fontSize: 10, letterSpacing: 3, fontWeight: '700' },
+  idLabel: { color: '#ef4444', fontSize: 10, letterSpacing: 3, fontWeight: '700' },
   idValue: { color: '#d4d4d8', fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', flex: 1 },
   signalServerInput: { backgroundColor: '#18181b', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6 },
   refreshBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#27272a', alignItems: 'center', justifyContent: 'center' },
@@ -1229,7 +1238,7 @@ const s = StyleSheet.create({
   consoleToggleText: { color: '#ef4444', fontSize: 10, letterSpacing: 2, fontWeight: '700', textTransform: 'uppercase' },
   logScroll: { paddingHorizontal: 14 },
   logLine: { fontSize: 10, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 3, lineHeight: 16 },
-  logTime: { color: '#52525b' },
+  logTime: { color: '#a1a1aa' },
   log_info: { color: '#d4d4d8' },
   log_success: { color: '#22c55e' },
   log_error: { color: '#ef4444' },
