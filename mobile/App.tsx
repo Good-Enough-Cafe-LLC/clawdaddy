@@ -17,20 +17,21 @@ import {
   SafeAreaView, Text, Switch, StyleSheet, View, ScrollView,
   TouchableOpacity, Animated, Easing, StatusBar, Platform,
   TextInput, KeyboardAvoidingView, FlatList, Dimensions,
+  Alert,
 } from 'react-native';
 import { initLlama, LlamaContext } from 'llama.rn';
 import RNFS from 'react-native-fs';
-import { 
-  loadClientSession, 
-  saveClientSession, 
-  extractLTMFacts, 
-  formatLTM, 
-  ClientSession 
+import {
+  loadClientSession,
+  saveClientSession,
+  extractLTMFacts,
+  formatLTM,
+  ClientSession
 } from './src/session/sessionManager';
 import { estimateTokens } from './src/session/tokenEstimator';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const SIGNAL_SERVER = 'https://clawdaddyswitch01.goodenoughcafe.com';
+const DEFAULT_SIGNAL_SERVER = 'https://clawdaddyswitch01.goodenoughcafe.com';
 const CONFIG_PATH = `${RNFS.DocumentDirectoryPath}/clawdaddy.config.json`;
 const MODES_PATH = `${RNFS.DocumentDirectoryPath}/clawdaddy.modes.json`;
 const { width: SCREEN_W } = Dimensions.get('window');
@@ -128,6 +129,9 @@ const App = () => {
   const clientRef = useRef<any>(null);
   const [pairingCode, setPairingCode] = useState('');
   const [showPairingCode, setShowPairingCode] = useState(false);
+  const [signalServer, setSignalServer] = useState(DEFAULT_SIGNAL_SERVER);
+  const [editingSignalServer, setEditingSignalServer] = useState(false);
+  const [tempSignalServer, setTempSignalServer] = useState('');
 
   // Client sessions (per connected client) — use ref because UI doesn't need to re-render on changes
   const clientSessionsRef = useRef<Map<string, ClientSession>>(new Map());
@@ -169,9 +173,11 @@ const App = () => {
   }, []);
 
   // ── Boot ──────────────────────────────────────────────────────────────────
+  // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       try {
+        // Load modes first
         if (await RNFS.exists(MODES_PATH)) {
           const saved: Mode[] = JSON.parse(await RNFS.readFile(MODES_PATH, 'utf8'));
           const builtinIds = new Set(BUILTIN_MODES.map(m => m.id));
@@ -179,31 +185,70 @@ const App = () => {
           setModes(merged);
           modesRef.current = merged;
         }
-      } catch { addLog('Failed to load modes', 'error'); }
+      } catch (e) {
+        addLog('Failed to load modes', 'error');
+      }
 
       try {
         const configExists = await RNFS.exists(CONFIG_PATH);
-        const config = configExists ? JSON.parse(await RNFS.readFile(CONFIG_PATH, 'utf8')) : {};
-        const savedId = config.nodeId ?? generateNodeId();
+        let config: any = {}; // Use 'any' or create an interface for config
+
+        if (configExists) {
+          const configContent = await RNFS.readFile(CONFIG_PATH, 'utf8');
+          config = JSON.parse(configContent);
+          addLog(`Loaded existing config`, 'info');
+          addLog(`Config content: ${JSON.stringify(config).slice(0, 100)}`, 'info');
+        }
+
+        // Use existing values or generate new ones
+        const savedId = config.nodeId || generateNodeId();
         const savedCode = config.pairingCode ? normalizePairingCode(config.pairingCode) : generatePairingCode();
+        const savedSignalServer = config.signalServer || DEFAULT_SIGNAL_SERVER;
 
         setPhoneId(savedId);
         setPairingCode(savedCode);
+        setSignalServer(savedSignalServer);
 
+        addLog(`Node ID: ${savedId}`, 'info');
+        addLog(`Pairing Code: ${savedCode}`, 'info');
+
+        // Load model if exists
         if (config.modelPath && await RNFS.exists(config.modelPath)) {
           setModelPath(config.modelPath);
           addLog('Model found. Loading…', 'info');
           try {
             llamaRef.current = await initLlama({
-              model: config.modelPath, n_ctx: 4096, n_threads: 4, n_gpu_layers: 1, n_batch: 512,
+              model: config.modelPath,
+              n_ctx: 4096,
+              n_threads: 4,
+              n_gpu_layers: 1,
+              n_batch: 512,
             } as any);
             addLog('Model ready.', 'success');
-          } catch (e: any) { addLog(`Model load failed: ${e?.message}`, 'error'); }
+          } catch (e: any) {
+            addLog(`Model load failed: ${e?.message}`, 'error');
+          }
         }
-        await RNFS.writeFile(CONFIG_PATH, JSON.stringify({ ...config, nodeId: savedId, pairingCode: savedCode }), 'utf8');
+
+        // Save config to ensure it exists
+        const configToSave = {
+          nodeId: savedId,
+          pairingCode: savedCode,
+          signalServer: savedSignalServer,
+          modelPath: config.modelPath || null
+        };
+
+        await RNFS.writeFile(CONFIG_PATH, JSON.stringify(configToSave, null, 2), 'utf8');
+        addLog(`Config saved with ID: ${savedId}`, 'info');
+
       } catch (e: any) {
         addLog(`Boot error: ${e?.message}`, 'error');
-        setPhoneId(generateNodeId());
+        // Fallback to fresh values
+        const newId = generateNodeId();
+        const newCode = generatePairingCode();
+        setPhoneId(newId);
+        setPairingCode(newCode);
+        addLog(`Generated fresh values - ID: ${newId}, Code: ${newCode}`, 'info');
       }
 
       setPhase('ready');
@@ -260,6 +305,40 @@ const App = () => {
     } catch (_) { }
     addLog(`Pairing code refreshed`, 'info');
   }, [active, addLog]);
+
+  // ── Signal server management ──────────────────────────────────────────────
+  const startEditSignalServer = useCallback(() => {
+    setTempSignalServer(signalServer);
+    setEditingSignalServer(true);
+  }, [signalServer]);
+
+  const saveSignalServer = useCallback(async () => {
+    let newUrl = tempSignalServer.trim();
+
+    // Auto-add https:// if missing
+    if (newUrl && !newUrl.startsWith('http://') && !newUrl.startsWith('https://')) {
+      newUrl = 'https://' + newUrl;
+    }
+
+    // Remove trailing slashes
+    newUrl = newUrl.replace(/\/+$/, '');
+
+    if (active) {
+      addLog('Please deactivate node before changing signal server', 'error');
+      setEditingSignalServer(false);
+      return;
+    }
+
+    setSignalServer(newUrl);
+    setEditingSignalServer(false);
+
+    // Save to config
+    try {
+      const cfg = await RNFS.exists(CONFIG_PATH) ? JSON.parse(await RNFS.readFile(CONFIG_PATH, 'utf8')) : {};
+      await RNFS.writeFile(CONFIG_PATH, JSON.stringify({ ...cfg, signalServer: newUrl }), 'utf8');
+      addLog(`Signal server updated to: ${newUrl}`, 'success');
+    } catch (_) { }
+  }, [tempSignalServer, active, addLog]);
 
   // ── Personality editor actions ────────────────────────────────────────────
   const openEdit = useCallback((mode: Mode) => {
@@ -322,7 +401,7 @@ const App = () => {
     }
 
     const client = createSocketClient({
-      url: SIGNAL_SERVER,
+      url: signalServer,
       phoneId,
       pairingCode,
       onConnect: () => addLog(`Registered as ${phoneId}`, 'info'),
@@ -335,7 +414,7 @@ const App = () => {
           case 'inference': {
             const clientId = packet.clientId;
             const session = clientId ? clientSessionsRef.current.get(clientId) : null;
-            
+
             // Buffer for this request's assistant response
             let assistantResponse = '';
 
@@ -381,7 +460,7 @@ const App = () => {
             const wrappedSend = (pkt: any) => {
               // Forward to remote client
               send(pkt);
-              
+
               // Capture assistant response tokens for local session
               if (pkt.type === 'token') {
                 assistantResponse += pkt.token;
@@ -397,11 +476,9 @@ const App = () => {
               onEnd: async () => {
                 setInferring(false);
                 inferringRef.current = false;
-                
 
                 // Save assistant response to session
                 if (session && assistantResponse) {
-
                   session.conversationHistory.push({
                     role: 'assistant',
                     content: assistantResponse,
@@ -411,10 +488,9 @@ const App = () => {
                   session.totalTokens += estimateTokens(assistantResponse);
                   await saveClientSession(session);
                   addLog(`💾 Saved conversation to session (${session.conversationHistory.length} messages)`);
-                  
                 }
               },
-              onLog: addLog,
+              onLog: (log: string) => addLog(log, 'info')
             });
             break;
           }
@@ -647,7 +723,7 @@ const App = () => {
 
     clientRef.current = client;
     return () => { client.disconnect(); clientRef.current = null; setConnected(false); };
-  }, [active, phoneId, pairingCode, addLog, persistUserModes]);
+  }, [active, phoneId, pairingCode, signalServer, addLog, persistUserModes]);
 
   // ── Local adapter ─────────────────────────────────────────────────────────
   const localAdapter = useRef(
@@ -827,26 +903,64 @@ const App = () => {
                     </View>
                   )}
 
+                  {/* Node ID row - buttons on right */}
                   <View style={s.idRow}>
                     <Text style={s.idLabel}>NODE ID</Text>
                     <Text style={s.idValue}>{phoneId || '--------'}</Text>
-                    <TouchableOpacity onPress={refreshNodeId} style={s.refreshBtn} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                      <Text style={s.refreshIcon}>↻</Text>
-                    </TouchableOpacity>
+                    <View style={s.rightButtonGroup}>
+                      <TouchableOpacity onPress={refreshNodeId} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Text style={s.refreshIcon}>↻</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
 
-                  {/* Pairing Code row */}
+                  {/* Pairing Code row - reorganized layout */}
                   <View style={s.idRow}>
                     <Text style={s.idLabel}>PAIRING CODE</Text>
                     <Text style={s.idValue}>
                       {showPairingCode ? pairingCode : '••••-••••'}
                     </Text>
-                    <TouchableOpacity onPress={() => setShowPairingCode(!showPairingCode)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                      <Text style={s.refreshIcon}>{showPairingCode ? '👁' : '👁‍🗨'}</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity onPress={refreshPairingCode} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-                      <Text style={s.refreshIcon}>↻</Text>
-                    </TouchableOpacity>
+                    <View style={s.rightButtonGroup}>
+                      <TouchableOpacity onPress={() => setShowPairingCode(!showPairingCode)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Text style={s.refreshIcon}>{showPairingCode ? '👁' : '👁‍🗨'}</Text>
+                      </TouchableOpacity>
+                      <TouchableOpacity onPress={refreshPairingCode} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+                        <Text style={s.refreshIcon}>↻</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+
+
+
+                  {/* Signal Server row */}
+                  <View style={s.idRow}>
+                    <Text style={s.idLabel}>SIGNAL SERVER</Text>
+                    {editingSignalServer ? (
+                      <TextInput
+                        style={[s.idValue, s.signalServerInput]}
+                        value={tempSignalServer}
+                        onChangeText={setTempSignalServer}
+                        placeholder={DEFAULT_SIGNAL_SERVER}
+                        placeholderTextColor="#52525b"
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        onSubmitEditing={saveSignalServer}
+                        onBlur={saveSignalServer}
+                        autoFocus
+                      />
+                    ) : (
+                      <Text style={s.idValue} numberOfLines={1} ellipsizeMode="middle">
+                        {signalServer.replace('https://', '').replace('http://', '')}
+                      </Text>
+                    )}
+                    <View style={s.rightButtonGroup}>
+                      <TouchableOpacity
+                        onPress={editingSignalServer ? saveSignalServer : startEditSignalServer}
+                        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                      >
+                        <Text style={s.refreshIcon}>{editingSignalServer ? '✓' : '✎'}</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
 
                   {modelPath ? (
@@ -1078,29 +1192,30 @@ const s = StyleSheet.create({
   swipeHint: { position: 'absolute', right: 20, fontSize: 10, color: '#52525b', letterSpacing: 0.5 },
 
   centerCard: { flex: 1, marginHorizontal: 24, justifyContent: 'center' },
-  loadingText: { color: '#52525b', fontSize: 14, textAlign: 'center' },
+  loadingText: { color: '#a1a1aa', fontSize: 14, textAlign: 'center' },
   pairedContainer: { flex: 1, paddingHorizontal: 22, paddingTop: 6 },
   cardTitle: { fontSize: 18, fontWeight: '700', color: '#f4f4f5', marginBottom: 8 },
-  cardBody: { fontSize: 13, color: '#71717a', lineHeight: 20, marginBottom: 18 },
+  cardBody: { fontSize: 13, color: '#a1a1aa', lineHeight: 20, marginBottom: 18 },
   primaryBtn: { backgroundColor: '#ef4444', borderRadius: 12, paddingVertical: 14, paddingHorizontal: 18, alignItems: 'center', marginBottom: 10 },
   primaryBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   primaryBtnSub: { color: 'rgba(255,255,255,0.55)', fontSize: 11, marginTop: 3 },
   toggleCard: { backgroundColor: '#18181b', borderRadius: 14, padding: 18, borderWidth: 1, borderColor: '#27272a', marginBottom: 14 },
   toggleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   toggleLabel: { color: '#f4f4f5', fontSize: 15, fontWeight: '600', marginBottom: 2 },
-  toggleSub: { color: '#52525b', fontSize: 11 },
+  toggleSub: { color: '#a1a1aa', fontSize: 11 },
   statusRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18 },
   statusDot: { width: 9, height: 9, borderRadius: 5 },
-  statusText: { color: '#a1a1aa', fontSize: 13 },
+  statusText: { color: '#d4d4d8', fontSize: 13 },
   idRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 18, paddingHorizontal: 2 },
-  idLabel: { color: '#52525b', fontSize: 10, letterSpacing: 3, fontWeight: '700' },
-  idValue: { color: '#52525b', fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', flex: 1 },
-  refreshBtn: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#27272a', alignItems: 'center', justifyContent: 'center' },
-  refreshIcon: { color: '#71717a', fontSize: 13, lineHeight: 16 },
+  idLabel: { color: '#a1a1aa', fontSize: 10, letterSpacing: 3, fontWeight: '700' },
+  idValue: { color: '#d4d4d8', fontSize: 12, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', flex: 1 },
+  signalServerInput: { backgroundColor: '#18181b', paddingVertical: 4, paddingHorizontal: 8, borderRadius: 6 },
+  refreshBtn: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#27272a', alignItems: 'center', justifyContent: 'center' },
+  refreshIcon: { color: '#a1a1aa', fontSize: 14, lineHeight: 18 },
   modelBadge: { backgroundColor: '#18181b', borderRadius: 12, paddingVertical: 12, paddingHorizontal: 14, marginBottom: 10, borderWidth: 1, borderColor: '#27272a' },
-  modelBadgeLabel: { color: '#52525b', fontSize: 9, letterSpacing: 3, fontWeight: '700', marginBottom: 4 },
-  modelBadgeName: { color: '#e4e4e7', fontSize: 12, fontWeight: '600', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
-  unpairBtnText: { color: '#3f3f46', fontSize: 11 },
+  modelBadgeLabel: { color: '#a1a1aa', fontSize: 9, letterSpacing: 3, fontWeight: '700', marginBottom: 4 },
+  modelBadgeName: { color: '#f4f4f5', fontSize: 12, fontWeight: '600', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  unpairBtnText: { color: '#a1a1aa', fontSize: 11 },
   downloadStats: { color: '#a1a1aa', fontSize: 12, marginBottom: 10 },
   progressTrack: { height: 5, backgroundColor: '#27272a', borderRadius: 3, overflow: 'hidden', marginBottom: 6 },
   progressFill: { height: '100%', backgroundColor: '#ef4444', borderRadius: 3 },
@@ -1114,8 +1229,8 @@ const s = StyleSheet.create({
   consoleToggleText: { color: '#ef4444', fontSize: 10, letterSpacing: 2, fontWeight: '700', textTransform: 'uppercase' },
   logScroll: { paddingHorizontal: 14 },
   logLine: { fontSize: 10, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace', marginBottom: 3, lineHeight: 16 },
-  logTime: { color: '#3f3f46' },
-  log_info: { color: '#71717a' },
+  logTime: { color: '#52525b' },
+  log_info: { color: '#d4d4d8' },
   log_success: { color: '#22c55e' },
   log_error: { color: '#ef4444' },
   log_data: { color: '#f59e0b' },
@@ -1126,10 +1241,10 @@ const s = StyleSheet.create({
   modeChipActive: { borderColor: '#f59e0b', backgroundColor: 'rgba(245,158,11,0.07)' },
   modeChipNew: { borderStyle: 'dashed' },
   modeChipIcon: { fontSize: 13 },
-  modeChipName: { fontSize: 11, color: '#52525b', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  modeChipName: { fontSize: 11, color: '#a1a1aa', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
   modeChipNameActive: { color: '#f59e0b' },
   chipEditBtn: { marginLeft: 2 },
-  chipEditIcon: { fontSize: 11, color: '#3f3f46' },
+  chipEditIcon: { fontSize: 11, color: '#a1a1aa' },
   chipEditIconActive: { color: '#f59e0b' },
 
   editorPanel: { backgroundColor: '#0f0f0f', borderBottomWidth: 1, borderBottomColor: '#1a1a1a', padding: 14, gap: 10 },
@@ -1146,8 +1261,8 @@ const s = StyleSheet.create({
 
   emptyChat: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
   emptyChatEmoji: { fontSize: 42, opacity: 0.2 },
-  emptyChatText: { fontSize: 13, color: '#3f3f46', letterSpacing: 1 },
-  emptyChatSub: { fontSize: 11, color: '#27272a', textAlign: 'center', paddingHorizontal: 40, lineHeight: 17 },
+  emptyChatText: { fontSize: 13, color: '#a1a1aa', letterSpacing: 1 },
+  emptyChatSub: { fontSize: 11, color: '#52525b', textAlign: 'center', paddingHorizontal: 40, lineHeight: 17 },
 
   messageList: { padding: 16, gap: 12, flexGrow: 1 },
   msgRow: { maxWidth: '84%' },
@@ -1159,7 +1274,11 @@ const s = StyleSheet.create({
   msgText: { fontSize: 14, color: '#e4e4e7', lineHeight: 22 },
   msgTextUser: { color: '#fff' },
   cursor: { color: '#22c55e' },
-  msgStats: { fontSize: 10, color: '#3f3f46', marginTop: 4, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  msgStats: { fontSize: 10, color: '#a1a1aa', marginTop: 4, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
+  rightButtonGroup: {
+    flexDirection: 'row',
+    gap: 8,
+  },
 
   inputBar: { flexDirection: 'row', padding: 12, gap: 10, borderTopWidth: 1, borderTopColor: '#18181b', backgroundColor: '#0a0a0a', alignItems: 'flex-end' },
   chatInput: { flex: 1, backgroundColor: '#18181b', borderWidth: 1, borderColor: '#27272a', borderRadius: 20, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 10, color: '#e4e4e7', fontSize: 14, maxHeight: 120 },

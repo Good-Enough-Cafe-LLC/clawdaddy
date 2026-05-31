@@ -6,7 +6,6 @@ const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS  = 30000;
 
 const normalizePhoneId = (id: string): string => id.trim().toUpperCase();
-
 const normalizePairingCode = (code: string): string => {
   const cleaned = code.trim().toUpperCase().replace(/\s+/g, '');
   if (cleaned.length === 8 && !cleaned.includes('-')) {
@@ -48,10 +47,10 @@ export const createSocketClient = ({
   const sharedKey = deriveSharedKey(normalizedPairingCode, normalizedPhoneId);
   const authHash  = computeAuthHash(sharedKey);
 
-  log('🔐 PHONE DEBUG:');
-  log(`   Phone ID:     ${normalizedPhoneId}`);
+  log('🔐 SERVER DEBUG:');
+  log(`   Server ID:    ${normalizedPhoneId}`);
   log(`   Pairing Code: ${normalizedPairingCode}`);
-  log(`   Auth Hash:    ${authHash.slice(0, 16)}...`); 
+  log(`   Auth Hash:    ${authHash.slice(0, 16)}...`);
 
   const scheduleReconnect = () => {
     if (destroyed || reconnectTimer) return;
@@ -82,9 +81,7 @@ export const createSocketClient = ({
     sock.on('connect', () => {
       reconnectAttempt = 0;
 
-      // Generate a fresh sessionId for this connection attempt.
-      // The phone is always the server role — it waits for clients (the CLI/web)
-      // to connect to it via the switchboard.
+      // Register as a SERVER node (broadcaster)
       sock.emit('register', {
         role:     'server',
         serverId: normalizedPhoneId,
@@ -94,20 +91,18 @@ export const createSocketClient = ({
       log(`📱 Registering as server: ${normalizedPhoneId}`, 'info');
     });
 
-    // Wait for switchboard confirmation before setting up WebRTC.
-    // This matches the pattern used on the CLI and web sides.
+    // Wait for switchboard confirmation before setting up WebRTC
     sock.on('registered', ({ role, serverId }: { role: string; serverId: string }) => {
       if (role !== 'server') return;
       log(`✅ Registered as server: ${serverId}`, 'success');
       onConnect();
 
-      // Phone is always the receiver — it waits for offers from clients.
-      // WebRTC is created here and stays alive, ready to accept any incoming
-      // client_session that the switchboard forwards.
+      // Phone is always the receiver — it waits for offers from clients
       rtc = createWebRTC({
         socket: sock,
         authHash,
         sharedKey,
+        role: 'receiver',  // Server receives connections
         log,
         onOpen: () => {
           log('🔓 P2P tunnel open — client connected!', 'success');
@@ -116,8 +111,6 @@ export const createSocketClient = ({
         onClose: () => {
           log('🔒 P2P tunnel closed.', 'error');
           onTunnelClose();
-          // Don't full teardown — stay registered on the switchboard so new
-          // clients can connect without needing to re-register.
           rtc = null;
         },
         onData: (packet) => {
@@ -126,7 +119,20 @@ export const createSocketClient = ({
       });
     });
 
-    // ── Switchboard-level errors ────────────────────────────────────────────
+    // Handle incoming client sessions
+    sock.on('client_session', ({ sessionId }: { sessionId: string }) => {
+      log(`📲 Client connecting: ${sessionId.slice(0, 8)}...`, 'info');
+      // WebRTC will handle the connection via signals
+    });
+
+    // Handle signals from clients
+    sock.on('signal', ({ sessionId, signalData }: { sessionId: string; signalData: any }) => {
+      if (rtc) {
+        (rtc as any).receiveSignal?.(signalData);
+      }
+    });
+
+    // Switchboard-level errors
     sock.on('error', ({ code, message }: { code: string; message: string }) => {
       log(`❌ Switchboard [${code}]: ${message}`, 'error');
       // Validation errors won't fix themselves — stop retrying
