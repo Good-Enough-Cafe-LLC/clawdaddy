@@ -1,4 +1,4 @@
-// webrtcProvider.ts - Complete working version
+// webrtcProvider.ts - Clean version (no verbose logs)
 import {
   RTCPeerConnection,
   RTCIceCandidate,
@@ -64,8 +64,6 @@ export const createWebRTC = ({
   let isConnected = false;
   let isClosed = false;
 
-  log(`📱 Creating WebRTC receiver for session ${sessionId.slice(0, 8)}...`, 'info');
-
   pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -79,7 +77,6 @@ export const createWebRTC = ({
   // Send ICE candidates
   pc.addEventListener('icecandidate', (event: any) => {
     if (event.candidate && !isClosed && sessionId) {
-      log(`❄️ Sending ICE candidate`, 'info');
       socket.emit('signal', {
         sessionId,
         signalData: { candidate: event.candidate },
@@ -87,40 +84,19 @@ export const createWebRTC = ({
     }
   });
 
-  // Log ICE connection state
-  pc.addEventListener('iceconnectionstatechange', () => {
-    if (pc) {
-      const state = pc.iceConnectionState;
-      log(`❄️ ICE state: ${state}`, 'info');
-      if (state === 'connected') {
-        log('✅ ICE connected!', 'success');
-      } else if (state === 'failed') {
-        log('❌ ICE failed', 'error');
-      }
-    }
-  });
-
   // Handle connection state
   pc.addEventListener('connectionstatechange', () => {
-    if (pc) {
-      const state = pc.connectionState;
-      log(`🔌 Connection state: ${state}`, 'info');
-      if (state === 'connected' && !isConnected && !isClosed) {
-        isConnected = true;
-        log('🎉 WebRTC connected!', 'success');
-        onOpen();
-      }
+    if (pc && pc.connectionState === 'connected' && !isConnected && !isClosed) {
+      isConnected = true;
+      onOpen();
     }
   });
 
-  // Handle incoming data channel (client will create it)
+  // Handle incoming data channel
   pc.addEventListener('datachannel', (event: any) => {
-    log('📨 Data channel received!', 'success');
     const channel = event.channel;
     
-    // Setup the data channel
     channel.onopen = () => {
-      log('🔓 Data channel open', 'success');
       if (!isConnected && !isClosed) {
         isConnected = true;
         onOpen();
@@ -128,7 +104,6 @@ export const createWebRTC = ({
     };
     
     channel.onclose = () => {
-      log('🔒 Data channel closed', 'info');
       if (isConnected && !isClosed) {
         isConnected = false;
         onClose();
@@ -136,7 +111,7 @@ export const createWebRTC = ({
     };
     
     channel.onerror = (error: any) => {
-      log(`❌ Data channel error: ${error.message}`, 'error');
+      log(`Data channel error: ${error.message}`, 'error');
     };
     
     channel.onmessage = (event: any) => {
@@ -150,7 +125,7 @@ export const createWebRTC = ({
           const packet = JSON.parse(serialised);
           if (packet.signature && packet.payload) {
             if (!verifyHMAC(sharedKey, packet.payload, packet.signature)) {
-              log('❌ HMAC failed', 'error');
+              log('HMAC verification failed', 'error');
               return;
             }
             onData(packet.payload);
@@ -159,7 +134,7 @@ export const createWebRTC = ({
           }
         } else if (parsed.signature && parsed.payload) {
           if (!verifyHMAC(sharedKey, parsed.payload, parsed.signature)) {
-            log('❌ HMAC failed', 'error');
+            log('HMAC verification failed', 'error');
             return;
           }
           onData(parsed.payload);
@@ -167,111 +142,58 @@ export const createWebRTC = ({
           onData(parsed);
         }
       } catch (e) {
-        log(`❌ Message error: ${e}`, 'error');
+        log(`Message error: ${e}`, 'error');
       }
     };
     
     dataChannel = channel;
   });
 
-  // Signal method for MultiPeerManager to call
   const signal = async (signalData: any) => {
     try {
       if (signalData.type === 'offer') {
-        log(`📞 Received offer, creating answer...`, 'info');
         if (pc) {
           await pc.setRemoteDescription(new RTCSessionDescription(signalData));
           const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          log(`📞 Sending answer`, 'info');
           socket.emit('signal', { sessionId, signalData: answer });
         }
       } else if (signalData.candidate) {
-        log(`❄️ Adding ICE candidate`, 'info');
         if (pc) {
           await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
         }
       }
     } catch (e: any) {
-      log(`❌ Signal error: ${e.message}`, 'error');
+      log(`Signal error: ${e.message}`, 'error');
     }
   };
 
-  // Send function with proper error handling
-  // Replace the send function in webrtcProvider.ts with this debugging version:
-
-const send = (packet: any) => {
-  log(`📤 send() called`, 'info');
-  
-  if (!dataChannel) {
-    log('❌ dataChannel is null', 'error');
-    return;
-  }
-  
-  // Log everything about the dataChannel object
-  log(`📊 dataChannel keys: ${Object.keys(dataChannel).join(', ')}`, 'info');
-  log(`📊 dataChannel prototype keys: ${Object.keys(Object.getPrototypeOf(dataChannel)).join(', ')}`, 'info');
-  log(`📊 dataChannel.readyState: ${dataChannel.readyState}`, 'info');
-  log(`📊 typeof dataChannel.send: ${typeof dataChannel.send}`, 'info');
-  log(`📊 dataChannel._send: ${typeof dataChannel._send}`, 'info');
-  log(`📊 dataChannel.sendMessage: ${typeof dataChannel.sendMessage}`, 'info');
-  
-  // Try different possible method names
-  let sendMethod = null;
-  
-  if (typeof dataChannel.send === 'function') {
-    sendMethod = dataChannel.send;
-    log('✅ Using dataChannel.send', 'info');
-  } else if (typeof dataChannel._send === 'function') {
-    sendMethod = dataChannel._send;
-    log('✅ Using dataChannel._send', 'info');
-  } else if (typeof dataChannel.sendMessage === 'function') {
-    sendMethod = dataChannel.sendMessage;
-    log('✅ Using dataChannel.sendMessage', 'info');
-  } else if (typeof dataChannel.sendData === 'function') {
-    sendMethod = dataChannel.sendData;
-    log('✅ Using dataChannel.sendData', 'info');
-  }
-  
-  if (!sendMethod) {
-    log('❌ No send method found on dataChannel!', 'error');
-    // Try to see if there's any function on the object
-    for (const key of Object.keys(dataChannel)) {
-      if (typeof dataChannel[key] === 'function') {
-        log(`   Found function: ${key}`, 'info');
+  const send = (packet: any) => {
+    if (!dataChannel || dataChannel.readyState !== 'open') {
+      log('Cannot send: data channel not ready', 'error');
+      return;
+    }
+    
+    try {
+      const signature = computeHMAC(sharedKey, packet);
+      const securePacket = { payload: packet, signature };
+      const serialised = JSON.stringify(securePacket);
+      const id = generateSimpleUUID();
+      const total = Math.ceil(serialised.length / CHUNK_SIZE);
+      
+      for (let i = 0; i < total; i++) {
+        const frame = {
+          id,
+          index: i,
+          total,
+          data: serialised.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
+        };
+        dataChannel.send(JSON.stringify(frame));
       }
+    } catch (err: any) {
+      log(`Send error: ${err.message}`, 'error');
     }
-    return;
-  }
-  
-  // Bind the method to the dataChannel object
-  const boundSend = sendMethod.bind(dataChannel);
-  
-  try {
-    const signature = computeHMAC(sharedKey, packet);
-    const securePacket = { payload: packet, signature };
-    const serialised = JSON.stringify(securePacket);
-    const id = generateSimpleUUID();
-    const total = Math.ceil(serialised.length / CHUNK_SIZE);
-    
-    log(`📤 Sending ${total} chunks, total size: ${serialised.length} bytes`, 'info');
-    
-    for (let i = 0; i < total; i++) {
-      const frame = {
-        id,
-        index: i,
-        total,
-        data: serialised.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE),
-      };
-      boundSend(JSON.stringify(frame));
-    }
-    
-    log(`✅ Packet sent successfully`, 'success');
-  } catch (err: any) {
-    log(`❌ Send error: ${err.message}`, 'error');
-    log(`   Stack: ${err.stack}`, 'error');
-  }
-};
+  };
 
   const close = () => {
     if (isClosed) return;

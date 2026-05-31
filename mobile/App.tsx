@@ -21,13 +21,7 @@ import {
 } from 'react-native';
 import { initLlama, LlamaContext } from 'llama.rn';
 import RNFS from 'react-native-fs';
-import {
-  loadClientSession,
-  saveClientSession,
-  extractLTMFacts,
-  formatLTM,
-  ClientSession
-} from './src/session/sessionManager';
+import { sessionManager, ClientSession } from './src/session/sessionManager';
 import { estimateTokens } from './src/session/tokenEstimator';
 import { registerGlobals } from 'react-native-webrtc';
 
@@ -142,9 +136,6 @@ const App = () => {
   const [editingSignalServer, setEditingSignalServer] = useState(false);
   const [tempSignalServer, setTempSignalServer] = useState('');
 
-  // Client sessions (per connected client) — use ref because UI doesn't need to re-render on changes
-  const clientSessionsRef = useRef<Map<string, ClientSession>>(new Map());
-
   // Swipe / page
   const [page, setPage] = useState(0);
   const pageScrollRef = useRef<ScrollView>(null);
@@ -166,6 +157,16 @@ const App = () => {
   // Animations
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const fadeAnim = useRef(new Animated.Value(0)).current;
+
+  const logForSession = (msg: string, type?: string) => {
+    // Map string type to LogType
+    let logType: LogType = 'info';
+    if (type === 'error') logType = 'error';
+    else if (type === 'success') logType = 'success';
+    else if (type === 'warn') logType = 'error';
+    else if (type === 'debug') logType = 'info';
+    addLog(msg, logType);
+  };
 
   // ── Persist user modes ────────────────────────────────────────────────────
   const persistUserModes = useCallback(async (allModes: Mode[]) => {
@@ -415,69 +416,83 @@ const App = () => {
       pairingCode,
       onConnect: () => addLog(`Registered as ${phoneId}`, 'info'),
       onDisconnect: () => addLog('Disconnected from switchboard.', 'error'),
-      onTunnelOpen: () => { setConnected(true); addLog('Tunnel active · P2P', 'success'); },
-      onTunnelClose: () => setConnected(false),
+      onTunnelOpen: (sessionId: string) => {
+        setConnected(true);
+        addLog('Tunnel active · P2P', 'success');
+      },
+      onTunnelClose: (sessionId: string) => {
+        setConnected(false);
+        // Clean up session after delay (in case client reconnects)
+        setTimeout(() => {
+          const session = sessionManager.getSession(sessionId);
+          if (session && Date.now() - session.lastActivity > 60000) {
+            sessionManager.cleanup(sessionId);
+          }
+        }, 60000);
+      },
       log: addLog,
-      onPacket: async (packet, send) => {
+      onPacket: async (packet, send, sessionId) => {
+        // Guard against undefined sessionId
+        if (!sessionId) {
+          addLog('❌ Received packet without sessionId', 'error');
+          return;
+        }
+
         switch (packet.type) {
           case 'inference': {
-            const clientId = packet.clientId;
-            const session = clientId ? clientSessionsRef.current.get(clientId) : null;
+            // Get or create session for this WebRTC sessionId
+            let session = sessionManager.getSession(sessionId);
+            if (!session) {
+              session = sessionManager.createSession(sessionId, 4096);
+            }
 
-            // Buffer for this request's assistant response
+            const clientId = packet.clientId;
+
+            // If client provided an ID, identify them (loads persisted memory)
+            if (clientId && typeof clientId === 'string' && clientId.length >= 8 && !session.clientId) {
+              await sessionManager.identify(sessionId, clientId, logForSession);
+              // Refresh session after identify
+              session = sessionManager.getSession(sessionId)!;
+            }
+
+            // Buffer for assistant response
             let assistantResponse = '';
 
-            // Build context from session if available
-            let messages = packet.messages;
-            if (session) {
-              // Inject LTM as system context
-              const ltmText = formatLTM(session.ltm);
-              const systemWithLTM = ltmText
-                ? `${session.systemPrompt}\n\n## What I know about you:\n${ltmText}`
-                : session.systemPrompt;
+            // Build context messages with LTM and STM
+            const contextMessages = sessionManager.buildContextMessages(sessionId);
 
-              messages = [
-                { role: 'system', content: systemWithLTM },
-                ...session.conversationHistory.map(m => ({ role: m.role, content: m.content })),
-                ...packet.messages,
-              ];
+            // Add the new user message to history
+            const messages = packet.messages || [];
+            const userMsg = messages[messages.length - 1];
+            if (userMsg?.role === 'user' && userMsg?.content) {
+              sessionManager.addToHistory(sessionId, 'user', userMsg.content);
 
-              // Update session with new user message
-              const userMsg = packet.messages[packet.messages.length - 1];
-              if (userMsg?.role === 'user') {
-                session.conversationHistory.push({
-                  role: 'user',
-                  content: userMsg.content,
-                  timestamp: Date.now(),
-                  tokenCount: estimateTokens(userMsg.content),
-                });
-
-                // Extract LTM facts
-                const { updated, newKeys } = extractLTMFacts(userMsg.content, session.ltm);
-                if (newKeys.length > 0) {
-                  session.ltm = updated;
-                  addLog(`💡 LTM extracted: ${newKeys.join(', ')}`, 'info');
-                }
-                session.totalTokens += estimateTokens(userMsg.content);
-                await saveClientSession(session);
-              }
+              // Extract LTM facts from user message
+              await sessionManager.extractAndSaveLTM(sessionId, userMsg.content, logForSession);
             }
 
             const mode = modesRef.current.find(m => m.id === activeModeIdRef.current) ?? DEFAULT_MODE;
 
-            // Wrap send to capture assistant response for session storage
+            // Wrap send to capture assistant response
             const wrappedSend = (pkt: any) => {
-              // Forward to remote client
               send(pkt);
-
-              // Capture assistant response tokens for local session
-              if (pkt.type === 'token') {
+              if (pkt.type === 'token' && pkt.token) {
                 assistantResponse += pkt.token;
               }
             };
 
+            // Create inference request with full context
+            const inferenceRequest = {
+              ...packet,
+              messages: [
+                ...contextMessages,
+                ...messages,
+              ],
+              activeMode: mode,
+            };
+
             runInference({
-              request: { ...packet, messages, activeMode: mode },
+              request: inferenceRequest,
               llama: llamaRef.current,
               send: wrappedSend,
               isBusy: () => inferringRef.current,
@@ -486,20 +501,13 @@ const App = () => {
                 setInferring(false);
                 inferringRef.current = false;
 
-                // Save assistant response to session
-                if (session && assistantResponse) {
-                  session.conversationHistory.push({
-                    role: 'assistant',
-                    content: assistantResponse,
-                    timestamp: Date.now(),
-                    tokenCount: estimateTokens(assistantResponse),
-                  });
-                  session.totalTokens += estimateTokens(assistantResponse);
-                  await saveClientSession(session);
-                  addLog(`💾 Saved conversation to session (${session.conversationHistory.length} messages)`);
+                // Save assistant response to session history
+                if (assistantResponse) {
+                  sessionManager.addToHistory(sessionId, 'assistant', assistantResponse);
+                  addLog(`💾 Saved conversation to memory`, 'info');
                 }
               },
-              onLog: (log: string) => addLog(log, 'info')
+              onLog: (logMsg: string) => addLog(logMsg, 'info'),
             });
             break;
           }
@@ -510,7 +518,6 @@ const App = () => {
             switch (command) {
               case 'identify': {
                 const { clientId } = payload ?? {};
-
                 if (!clientId || typeof clientId !== 'string' || clientId.length < 8) {
                   send({
                     type: 'command_error',
@@ -520,98 +527,102 @@ const App = () => {
                   break;
                 }
 
-                let session = clientSessionsRef.current.get(clientId);
+                await sessionManager.identify(sessionId, clientId, logForSession);
 
-                if (!session) {
-                  const loaded = await loadClientSession(clientId);
-
-                  if (loaded) {
-                    session = loaded;
-                    addLog(
-                      `🪪 Client ${clientId.slice(0, 12)}... identified — loaded ${Object.keys(loaded.ltm).length} LTM facts`,
-                      'info'
-                    );
-                  } else {
-                    session = {
-                      clientId,
-                      systemPrompt: `You are a helpful, friendly assistant.`,
-                      ltm: {},
-                      conversationHistory: [],
-                      totalTokens: 0,
-                      lastActivity: Date.now(),
-                      contextWindow: 4096,
-                    };
-                    addLog(
-                      `🪪 Client ${clientId.slice(0, 12)}... identified — new session`,
-                      'info'
-                    );
-                  }
-
-                  clientSessionsRef.current.set(clientId, session);
-                }
-
+                const memory = sessionManager.getMemory(sessionId);
                 send({
                   type: 'command_result',
                   requestId,
                   result: {
                     success: true,
-                    ltmFacts: Object.keys(session.ltm).length
+                    ltmFacts: Object.keys(memory.ltm ?? {}).length
                   }
                 });
                 break;
               }
 
               case 'get_memory': {
-                const session = clientSessionsRef.current.get(payload?.clientId || '');
-
-                if (!session) {
-                  send({
-                    type: 'command_result',
-                    requestId,
-                    result: { hasSession: false }
-                  });
-                  break;
-                }
-
                 send({
                   type: 'command_result',
                   requestId,
-                  result: {
-                    hasSession: true,
-                    clientId: session.clientId.slice(0, 12) + '...',
-                    contextWindow: session.contextWindow,
-                    usage: {
-                      stm: session.totalTokens,
-                      ltm: Object.values(session.ltm).reduce((sum, v) => sum + estimateTokens(v), 0),
-                    },
-                    ltm: session.ltm,
-                    stm: {
-                      messageCount: session.conversationHistory.length
-                    },
-                  }
+                  result: sessionManager.getMemory(sessionId)
                 });
                 break;
               }
 
               case 'clear_memory': {
-                const session = clientSessionsRef.current.get(payload?.clientId || '');
+                const cleared = sessionManager.clearHistory(sessionId);
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { success: true, messagesCleared: cleared }
+                });
+                break;
+              }
 
-                if (session) {
-                  session.conversationHistory = [];
-                  session.totalTokens = 0;
-                  await saveClientSession(session);
+              case 'get_system_prompt': {
+                const session = sessionManager.getSession(sessionId);
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { systemPrompt: session?.systemPrompt ?? '' }
+                });
+                break;
+              }
+
+              case 'set_system_prompt': {
+                if (typeof payload !== 'string') {
                   send({
-                    type: 'command_result',
+                    type: 'command_error',
                     requestId,
-                    result: { success: true, messagesCleared: true }
+                    error: 'payload must be a string'
                   });
-                } else {
-                  send({
-                    type: 'command_result',
-                    requestId,
-                    result: { success: true, messagesCleared: false }
-                  });
+                  break;
                 }
+                await sessionManager.setSystemPrompt(sessionId, payload);
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { success: true, message: 'System prompt updated' }
+                });
+                break;
+              }
+
+              case 'get_ltm': {
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { ltm: sessionManager.getLTM(sessionId) }
+                });
+                break;
+              }
+
+              case 'set_ltm_fact': {
+                const { key, value } = payload ?? {};
+                if (!key || typeof key !== 'string' || typeof value !== 'string') {
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: 'payload must be { key: string, value: string }'
+                  });
+                  break;
+                }
+                await sessionManager.setLTMFact(sessionId, key, value);
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { success: true, key, value }
+                });
+                break;
+              }
+
+              case 'clear_ltm': {
+                const count = await sessionManager.clearLTM(sessionId);
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { success: true, factsCleared: count }
+                });
                 break;
               }
 
@@ -625,7 +636,6 @@ const App = () => {
 
               case 'upsert_mode': {
                 const inc = payload as Mode;
-
                 if (modesRef.current.find(m => m.id === inc.id)?.locked) {
                   send({
                     type: 'command_error',
@@ -634,21 +644,10 @@ const App = () => {
                   });
                   break;
                 }
-
-                const up = [
-                  ...modesRef.current.filter(m => m.id !== inc.id),
-                  inc
-                ];
-
+                const up = [...modesRef.current.filter(m => m.id !== inc.id), inc];
                 setModes(up);
                 persistUserModes(up);
-
-                send({
-                  type: 'command_result',
-                  requestId,
-                  result: { ok: true }
-                });
-
+                send({ type: 'command_result', requestId, result: { ok: true } });
                 addLog(`Mode saved: ${inc.name}`, 'info');
                 break;
               }
@@ -656,60 +655,31 @@ const App = () => {
               case 'delete_mode': {
                 const tid = payload as string;
                 const t = modesRef.current.find(m => m.id === tid);
-
                 if (!t) {
-                  send({
-                    type: 'command_error',
-                    requestId,
-                    error: 'Not found.'
-                  });
+                  send({ type: 'command_error', requestId, error: 'Not found.' });
                   break;
                 }
-
                 if (t.locked) {
-                  send({
-                    type: 'command_error',
-                    requestId,
-                    error: 'Locked.'
-                  });
+                  send({ type: 'command_error', requestId, error: 'Locked.' });
                   break;
                 }
-
                 const up = modesRef.current.filter(m => m.id !== tid);
                 setModes(up);
                 persistUserModes(up);
-
-                if (activeModeIdRef.current === tid) {
-                  setActiveModeId('default');
-                }
-
-                send({
-                  type: 'command_result',
-                  requestId,
-                  result: { ok: true }
-                });
+                if (activeModeIdRef.current === tid) setActiveModeId('default');
+                send({ type: 'command_result', requestId, result: { ok: true } });
                 break;
               }
 
               case 'set_active_mode': {
                 const nid = payload as string;
                 const f = modesRef.current.find(m => m.id === nid);
-
                 if (!f) {
-                  send({
-                    type: 'command_error',
-                    requestId,
-                    error: 'Not found.'
-                  });
+                  send({ type: 'command_error', requestId, error: 'Not found.' });
                   break;
                 }
-
                 setActiveModeId(nid);
-                send({
-                  type: 'command_result',
-                  requestId,
-                  result: { ok: true }
-                });
+                send({ type: 'command_result', requestId, result: { ok: true } });
                 addLog(`Mode → ${f.icon ?? ''} ${f.name}`, 'info');
                 break;
               }

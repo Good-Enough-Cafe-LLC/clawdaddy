@@ -1,4 +1,4 @@
-// socketClient.ts - Complete rewrite to match npm server
+// socketClient.ts - Clean version without excessive debug logs
 import { io } from 'socket.io-client';
 import { MultiPeerManager } from './multiPeerManager';
 import { deriveSharedKey, computeAuthHash } from '@clawdaddy/core';
@@ -29,7 +29,7 @@ export const createSocketClient = ({
   url: string;
   phoneId: string;
   pairingCode: string;
-  onPacket: (packet: any, send: (p: any) => void, sessionId?: string) => void;
+  onPacket: (packet: any, send: (p: any) => void, sessionId: string) => void;
   onConnect: () => void;
   onDisconnect: () => void;
   onTunnelOpen: (sessionId: string) => void;
@@ -48,16 +48,16 @@ export const createSocketClient = ({
   const sharedKey = deriveSharedKey(normalizedPairingCode, normalizedPhoneId);
   const authHash = computeAuthHash(sharedKey);
 
-  log('🔐 SERVER DEBUG:');
-  log(`   Server ID:     ${normalizedPhoneId}`);
-  log(`   Pairing Code:  ${normalizedPairingCode}`);
-  log(`   Auth Hash:     ${authHash.slice(0, 16)}...`);
+  log(`🔐 Server ready | ID: ${normalizedPhoneId}`, 'info');
 
   const scheduleReconnect = () => {
     if (destroyed || reconnectTimer) return;
     reconnectAttempt++;
-    const delay = Math.min(RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt), RECONNECT_MAX_MS);
-    log(`Reconnecting in ${Math.round(delay / 1000)}s... (attempt ${reconnectAttempt})`, 'info');
+    const delay = Math.min(
+      RECONNECT_BASE_MS * Math.pow(2, reconnectAttempt),
+      RECONNECT_MAX_MS,
+    );
+    log(`Reconnecting in ${Math.round(delay / 1000)}s...`, 'info');
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (!destroyed) connect();
@@ -65,13 +65,20 @@ export const createSocketClient = ({
   };
 
   const teardown = () => {
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     if (peerManager) {
-      try { peerManager.close(); } catch (_) { }
+      try {
+        peerManager.close();
+      } catch (_) {}
       peerManager = null;
     }
     if (socket) {
-      try { socket.disconnect(); } catch (_) { }
+      try {
+        socket.disconnect();
+      } catch (_) {}
       socket = null;
     }
   };
@@ -80,59 +87,59 @@ export const createSocketClient = ({
     teardown();
     if (destroyed) return;
 
-    log('Connecting to switchboard as server node...', 'info');
+    log('Connecting to switchboard...', 'info');
 
     const sock = io(url, { transports: ['websocket'], reconnection: false });
     socket = sock;
 
     sock.on('connect', () => {
       reconnectAttempt = 0;
-      log('✅ Connected to switchboard', 'success');
-      
       sock.emit('register', {
         role: 'server',
         serverId: normalizedPhoneId,
         authHash,
       });
-      log(`📱 Registering as server: ${normalizedPhoneId}`, 'info');
     });
 
-    sock.on('registered', ({ role, serverId }: { role: string; serverId: string }) => {
-      if (role !== 'server') return;
-      log(`✅ Registered as server: ${serverId}`, 'success');
-      onConnect();
+    sock.on(
+      'registered',
+      ({ role, serverId }: { role: string; serverId: string }) => {
+        if (role !== 'server') return;
+        log(`✅ Registered | Waiting for connections`, 'success');
+        onConnect();
 
-      // Create MultiPeerManager to handle incoming connections
-      log(`📡 Creating MultiPeerManager with max connections: 5`, 'info');
-      peerManager = new MultiPeerManager({
-        socket: sock,
-        authHash,
-        sharedKey,
-        maxConnections: 5,
-        log,
-      });
+        peerManager = new MultiPeerManager({
+          socket: sock,
+          authHash,
+          sharedKey,
+          maxConnections: 5,
+          log,
+        });
 
-      // Forward peer events to the app
-      peerManager.on('peer-connected', (sessionId: string) => {
-        log(`🔓 Client connected: ${sessionId.slice(0, 8)}...`, 'success');
-        onTunnelOpen(sessionId);
-      });
+        peerManager.on('peer-connected', (sessionId: string) => {
+          log(`🔗 Client connected`, 'success');
+          onTunnelOpen(sessionId);
+        });
 
-      peerManager.on('peer-disconnected', (sessionId: string) => {
-        log(`🔒 Client disconnected: ${sessionId.slice(0, 8)}...`, 'info');
-        onTunnelClose(sessionId);
-      });
+        peerManager.on('peer-disconnected', (sessionId: string) => {
+          log(`🔌 Client disconnected`, 'info');
+          onTunnelClose(sessionId);
+        });
 
-      peerManager.on('peer-data', (sessionId: string, data: any) => {
-        // Wrap onPacket with a send function bound to this session
-        onPacket(data, (packet: any) => {
-          peerManager?.sendToPeer(sessionId, packet);
-        }, sessionId);
-      });
-    });
+        peerManager.on('peer-data', (sessionId: string, data: any) => {
+          onPacket(
+            data,
+            (packet: any) => {
+              peerManager?.sendToPeer(sessionId, packet);
+            },
+            sessionId,
+          ); // sessionId is guaranteed to be string here
+        });
+      },
+    );
 
     sock.on('error', ({ code, message }: { code: string; message: string }) => {
-      log(`❌ Switchboard [${code}]: ${message}`, 'error');
+      log(`❌ Switchboard error: ${message}`, 'error');
       if (code === 'VALIDATION' || code === 'CAPACITY') {
         teardown();
         destroyed = true;
@@ -140,13 +147,13 @@ export const createSocketClient = ({
     });
 
     sock.on('disconnect', (reason: string) => {
-      log(`Switchboard disconnected: ${reason}`, 'error');
+      log(`Disconnected from switchboard`, 'error');
       onDisconnect();
       scheduleReconnect();
     });
 
     sock.on('connect_error', (e: any) => {
-      log(`Switchboard error: ${e.message}`, 'error');
+      log(`Connection error: ${e.message}`, 'error');
       teardown();
       scheduleReconnect();
     });
@@ -164,7 +171,6 @@ export const createSocketClient = ({
         if (sessionId) {
           peerManager.sendToPeer(sessionId, packet);
         } else {
-          // Send to first peer if no session specified
           const peers = peerManager.getPeers();
           if (peers.length > 0) {
             peerManager.sendToPeer(peers[0], packet);

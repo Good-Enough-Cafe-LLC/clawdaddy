@@ -1,25 +1,19 @@
-import RNFS from 'react-native-fs';
-import { estimateTokens } from './tokenEstimator';
-
-const CLIENTS_DIR = `${RNFS.DocumentDirectoryPath}/clients`;
-
-export interface LTMFact {
-  key: string;
-  value: string;
-  timestamp: number;
-}
-
-export interface ConversationEntry {
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: number;
-  tokenCount: number;
-}
+// src/session/sessionManager.ts - Fixed
+import { 
+  loadClientData, 
+  saveSystemPrompt, 
+  saveLTM, 
+  saveSTM,
+  LTMStore,
+  ConversationEntry,
+  ClientData
+} from './persistence';
+import { extractLTMFacts, formatLTM, estimateTokens } from './memoryManager';
 
 export interface ClientSession {
-  clientId: string;
+  clientId: string | null;
   systemPrompt: string;
-  ltm: Record<string, string>;
+  ltm: LTMStore;
   conversationHistory: ConversationEntry[];
   totalTokens: number;
   lastActivity: number;
@@ -30,88 +24,205 @@ const DEFAULT_SYSTEM_PROMPT = `You are a helpful, friendly assistant.
 Be conversational and remember context from our conversation. 
 If you need to reference previous information, do so naturally.`;
 
-// LTM extraction patterns (same as server)
-const LTM_PATTERNS = [
-  { pattern: /my name is (\w+)/i, key: 'name', template: "User's name is $1" },
-  { pattern: /(?:i'?m|i am) (\d+) years? old/i, key: 'age', template: 'User is $1 years old' },
-  { pattern: /i live in ([^,.]+)/i, key: 'location', template: 'User lives in $1' },
-  // ... add more patterns
-];
+const CURRENT_MSG_RESERVE = 500; // tokens reserved for the user's next message
 
-function clientDir(clientId: string): string {
-  const safe = clientId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
-  return `${CLIENTS_DIR}/${safe}`;
-}
+class SessionManager {
+  private sessions: Map<string, ClientSession> = new Map();
 
-async function ensureClientDir(clientId: string): Promise<string> {
-  const dir = clientDir(clientId);
-  await RNFS.mkdir(dir, { NSURLIsExcludedFromBackupKey: true });
-  return dir;
-}
-
-export async function loadClientSession(clientId: string): Promise<ClientSession | null> {
-  const dir = clientDir(clientId);
-  if (!await RNFS.exists(dir)) return null;
-
-  let systemPrompt = DEFAULT_SYSTEM_PROMPT;
-  let ltm: Record<string, string> = {};
-  let conversationHistory: ConversationEntry[] = [];
-
-  const promptFile = `${dir}/system_prompt.txt`;
-  if (await RNFS.exists(promptFile)) {
-    systemPrompt = await RNFS.readFile(promptFile, 'utf8');
+  getSession(peerId: string): ClientSession | undefined {
+    return this.sessions.get(peerId);
   }
 
-  const ltmFile = `${dir}/ltm.json`;
-  if (await RNFS.exists(ltmFile)) {
-    try {
-      ltm = JSON.parse(await RNFS.readFile(ltmFile, 'utf8'));
-    } catch (_) {}
+  createSession(peerId: string, contextWindow: number = 8192): ClientSession {
+    const session: ClientSession = {
+      clientId: null,
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      ltm: {},
+      conversationHistory: [],
+      totalTokens: 0,
+      lastActivity: Date.now(),
+      contextWindow,
+    };
+    this.sessions.set(peerId, session);
+    return session;
   }
 
-  const stmFile = `${dir}/stm.json`;
-  if (await RNFS.exists(stmFile)) {
-    try {
-      conversationHistory = JSON.parse(await RNFS.readFile(stmFile, 'utf8'));
-    } catch (_) {}
-  }
-
-  return {
-    clientId,
-    systemPrompt,
-    ltm,
-    conversationHistory,
-    totalTokens: conversationHistory.reduce((sum, e) => sum + e.tokenCount, 0),
-    lastActivity: Date.now(),
-    contextWindow: 4096,
-  };
-}
-
-export async function saveClientSession(session: ClientSession): Promise<void> {
-  const dir = await ensureClientDir(session.clientId);
-  await RNFS.writeFile(`${dir}/system_prompt.txt`, session.systemPrompt, 'utf8');
-  await RNFS.writeFile(`${dir}/ltm.json`, JSON.stringify(session.ltm, null, 2), 'utf8');
-  // Keep only last 200 messages
-  const toSave = session.conversationHistory.slice(-200);
-  await RNFS.writeFile(`${dir}/stm.json`, JSON.stringify(toSave, null, 2), 'utf8');
-}
-
-export function extractLTMFacts(text: string, existing: Record<string, string>): { updated: Record<string, string>; newKeys: string[] } {
-  const updated = { ...existing };
-  const newKeys: string[] = [];
-
-  for (const { pattern, key, template } of LTM_PATTERNS) {
-    const match = text.match(pattern);
-    if (!match) continue;
-    const fact = template.replace(/\$(\d+)/g, (_, n) => (match[parseInt(n)] ?? '').trim());
-    if (fact && updated[key] !== fact) {
-      updated[key] = fact;
-      newKeys.push(key);
+  async identify(peerId: string, clientId: string, log: (msg: string, type?: string) => void): Promise<void> {
+    const session = this.sessions.get(peerId);
+    if (!session) return;
+    
+    session.clientId = clientId;
+    const saved = await loadClientData(clientId);
+    
+    if (saved) {
+      session.systemPrompt = saved.systemPrompt;
+      session.ltm = saved.ltm;
+      session.conversationHistory = saved.stm;
+      session.totalTokens = saved.stm.reduce((sum, e) => sum + e.tokenCount, 0);
+      log(`🪪 Identified ${clientId.slice(0, 12)}... — loaded ${Object.keys(saved.ltm).length} LTM facts`, 'info');
+    } else {
+      log(`🪪 Identified ${clientId.slice(0, 12)}... — new client`, 'info');
     }
   }
-  return { updated, newKeys };
+
+  addToHistory(peerId: string, role: 'user' | 'assistant' | 'system', content: string): void {
+    const session = this.sessions.get(peerId);
+    if (!session) return;
+    
+    const tokenCount = estimateTokens(content);
+    session.conversationHistory.push({
+      role,
+      content,
+      timestamp: Date.now(),
+      tokenCount,
+    });
+    session.totalTokens += tokenCount;
+    session.lastActivity = Date.now();
+    
+    if (session.clientId) {
+      saveSTM(session.clientId, session.conversationHistory).catch(console.error);
+    }
+  }
+
+  async extractAndSaveLTM(peerId: string, userText: string, log: (msg: string, type?: string) => void): Promise<void> {
+    const session = this.sessions.get(peerId);
+    if (!session?.clientId) return;
+    
+    const { updated, newKeys } = extractLTMFacts(userText, session.ltm);
+    if (newKeys.length === 0) return;
+    
+    session.ltm = updated;
+    await saveLTM(session.clientId, updated);
+    log(`💡 LTM updated: ${newKeys.map(k => `${k}="${updated[k]}"`).join(', ')}`, 'info');
+  }
+
+  clearHistory(peerId: string): number {
+    const session = this.sessions.get(peerId);
+    if (!session) return 0;
+    
+    const cleared = session.conversationHistory.length;
+    session.conversationHistory = [];
+    session.totalTokens = 0;
+    session.lastActivity = Date.now();
+    
+    if (session.clientId) {
+      saveSTM(session.clientId, []).catch(console.error);
+    }
+    return cleared;
+  }
+
+  async setSystemPrompt(peerId: string, newPrompt: string): Promise<string | null> {
+    const session = this.sessions.get(peerId);
+    if (!session) return null;
+    
+    const old = session.systemPrompt;
+    session.systemPrompt = newPrompt;
+    session.lastActivity = Date.now();
+    
+    if (session.clientId) {
+      await saveSystemPrompt(session.clientId, newPrompt);
+    }
+    return old;
+  }
+
+  getLTM(peerId: string): LTMStore {
+    return this.sessions.get(peerId)?.ltm ?? {};
+  }
+
+  async setLTMFact(peerId: string, key: string, value: string): Promise<void> {
+    const session = this.sessions.get(peerId);
+    if (!session) return;
+    
+    session.ltm[key] = value;
+    if (session.clientId) {
+      await saveLTM(session.clientId, session.ltm);
+    }
+  }
+
+  async clearLTM(peerId: string): Promise<number> {
+    const session = this.sessions.get(peerId);
+    if (!session) return 0;
+    
+    const count = Object.keys(session.ltm).length;
+    session.ltm = {};
+    if (session.clientId) {
+      await saveLTM(session.clientId, {});
+    }
+    return count;
+  }
+
+  buildContextMessages(peerId: string): Array<{ role: string; content: string }> {
+    const session = this.sessions.get(peerId);
+    if (!session) return [];
+    
+    const ltmText = formatLTM(session.ltm);
+    const systemContent = ltmText
+      ? `${session.systemPrompt}\n\n## What I know about you:\n${ltmText}`
+      : session.systemPrompt;
+    
+    const systemTokens = estimateTokens(systemContent);
+    const available = session.contextWindow - systemTokens - CURRENT_MSG_RESERVE;
+    
+    const history: ConversationEntry[] = [];
+    let used = 0;
+    for (let i = session.conversationHistory.length - 1; i >= 0; i--) {
+      const entry = session.conversationHistory[i];
+      if (used + entry.tokenCount > available) break;
+      history.unshift(entry);
+      used += entry.tokenCount;
+    }
+    
+    return [
+      { role: 'system', content: systemContent },
+      ...history.map(e => ({ role: e.role, content: e.content })),
+    ];
+  }
+
+  getMemory(peerId: string): any {
+    const session = this.sessions.get(peerId);
+    if (!session) return { hasSession: false };
+    
+    const ltmText = formatLTM(session.ltm);
+    const systemTokens = estimateTokens(session.systemPrompt);
+    const ltmTokens = estimateTokens(ltmText);
+    const stmTokens = session.totalTokens;
+    const totalUsed = systemTokens + ltmTokens + stmTokens;
+    
+    return {
+      hasSession: true,
+      clientId: session.clientId ? session.clientId.slice(0, 12) + '...' : null,
+      contextWindow: session.contextWindow,
+      usage: {
+        systemPrompt: systemTokens,
+        ltm: ltmTokens,
+        stm: stmTokens,
+        total: totalUsed,
+        available: session.contextWindow - totalUsed - CURRENT_MSG_RESERVE,
+        utilization: `${Math.round((totalUsed / session.contextWindow) * 100)}%`,
+      },
+      systemPrompt: session.systemPrompt,
+      ltm: session.ltm,
+      stm: {
+        messageCount: session.conversationHistory.length,
+        oldestMessage: session.conversationHistory[0]?.timestamp ?? null,
+        newestMessage: session.conversationHistory[session.conversationHistory.length - 1]?.timestamp ?? null,
+      },
+    };
+  }
+
+  cleanup(peerId?: string): void {
+    if (peerId) {
+      this.sessions.delete(peerId);
+    } else {
+      const now = Date.now();
+      const SESSION_TIMEOUT = 30 * 60 * 1000;
+      for (const [pid, session] of this.sessions.entries()) {
+        if (now - session.lastActivity > SESSION_TIMEOUT) {
+          this.sessions.delete(pid);
+        }
+      }
+    }
+  }
 }
 
-export function formatLTM(ltm: Record<string, string>): string {
-  return Object.values(ltm).join('\n');
-}
+export const sessionManager = new SessionManager();

@@ -1,4 +1,4 @@
-// multiPeerManager.ts for React Native - with proper EventEmitter
+// multiPeerManager.ts - Clean version (no verbose logs)
 import { createWebRTC } from './webrtcProvider';
 
 // Simple EventEmitter implementation for React Native
@@ -76,10 +76,6 @@ export class MultiPeerManager extends SimpleEventEmitter {
     this.startHeartbeat();
   }
 
-  private ts(): string {
-    return new Date().toISOString().slice(11, 19);
-  }
-
   private getActivePeerCount(): number {
     let count = 0;
     for (const [sessionId, peer] of this.peers.entries()) {
@@ -91,40 +87,25 @@ export class MultiPeerManager extends SimpleEventEmitter {
   private setupSocketHandlers(): void {
     // Handle client_session events from switchboard
     this.socket.on('client_session', ({ sessionId }: { sessionId: string }) => {
-      const ts = this.ts();
-
       // Clean up any existing session with this ID
       if (this.peers.has(sessionId) || this.pendingSessions.has(sessionId)) {
-        this.log(
-          `${ts} 🧹 Cleaning up existing session ${sessionId.slice(0, 8)}... before new client_session`,
-          'warn',
-        );
         this.teardownPeer(sessionId, 'new client_session');
         this.pendingSessions.delete(sessionId);
       }
 
       const activeCount = this.getActivePeerCount();
       if (activeCount >= this.maxConnections) {
-        this.log(
-          `${ts} ❌ Rejected session ${sessionId.slice(0, 8)}...: at capacity (${activeCount}/${this.maxConnections})`,
-          'error',
-        );
+        this.log(`❌ Session rejected: at capacity (${activeCount}/${this.maxConnections})`, 'error');
         return;
       }
 
       this.pendingSessions.add(sessionId);
-      this.log(
-        `${ts} 📲 Pending session: ${sessionId.slice(0, 8)}... (${activeCount + 1}/${this.maxConnections})`,
-        'info',
-      );
     });
 
     // Handle signals from switchboard
     this.socket.on('signal', ({ sessionId, signalData }: { sessionId: string; signalData: any }) => {
-      const ts = this.ts();
-
       if (!sessionId || !signalData) {
-        this.log(`${ts} ⚠️ Received signal with missing sessionId or signalData`, 'warn');
+        this.log(`⚠️ Received signal with missing sessionId or signalData`, 'warn');
         return;
       }
 
@@ -135,58 +116,37 @@ export class MultiPeerManager extends SimpleEventEmitter {
 
       // Non-offer signals route to existing peer
       const peer = this.peers.get(sessionId);
-      if (!peer) {
-        this.log(
-          `${ts} 🗑️ Ignoring ${signalData.type ?? 'candidate'} for unknown session ${sessionId.slice(0, 8)}...`,
-          'debug',
-        );
-        return;
-      }
+      if (!peer) return;
 
       const currentGen = this.sessionGenerations.get(sessionId);
-      if (peer.generation !== currentGen) {
-        this.log(
-          `${ts} 🗑️ Ignoring ${signalData.type ?? 'candidate'} — stale generation (peer: ${peer.generation}, current: ${currentGen})`,
-          'debug',
-        );
-        return;
-      }
+      if (peer.generation !== currentGen) return;
 
       try {
         peer.rtc.signal(signalData);
         peer.lastActivity = new Date();
       } catch (err: any) {
-        this.log(
-          `${ts} ❌ Failed to forward ${signalData.type ?? 'candidate'} to ${sessionId.slice(0, 8)}...: ${err.message}`,
-          'error',
-        );
+        this.log(`❌ Failed to forward signal: ${err.message}`, 'error');
       }
     });
 
     // Handle client disconnection
     this.socket.on('client_disconnected', ({ sessionId }: { sessionId: string }) => {
-      const ts = this.ts();
-      this.log(`${ts} ⚠️ Client disconnected mid-handshake: ${sessionId.slice(0, 8)}...`, 'info');
       this.pendingSessions.delete(sessionId);
       this.teardownPeer(sessionId, 'client disconnected');
     });
   }
 
   private handleOffer(sessionId: string, signalData: any): void {
-    const ts = this.ts();
-
     const hasActiveInference = this.activeInferenceSessions?.has(sessionId);
 
     if (hasActiveInference) {
-      this.log(`${ts} 🔄 Client reconnecting during active inference for ${sessionId.slice(0, 8)}...`, 'warn');
-      
       const existingPeer = this.peers.get(sessionId);
       if (existingPeer) {
         try {
           existingPeer.rtc?.signal(signalData);
           return;
         } catch (err) {
-          this.log(`${ts} Failed to reconnect, will create new`, 'warn');
+          // Will create new peer below
         }
       }
     }
@@ -194,7 +154,6 @@ export class MultiPeerManager extends SimpleEventEmitter {
     // Forceful cleanup of existing peer
     const existingPeer = this.peers.get(sessionId);
     if (existingPeer) {
-      this.log(`${ts} 🧹 Force cleaning existing peer for ${sessionId.slice(0, 8)}...`, 'info');
       try {
         existingPeer.rtc?.close();
       } catch (_) { }
@@ -205,25 +164,19 @@ export class MultiPeerManager extends SimpleEventEmitter {
 
     // Clean up stale generation without peer
     if (this.sessionGenerations.has(sessionId) && !this.peers.has(sessionId)) {
-      this.log(`${ts} 🧹 Cleaning stale generation for ${sessionId.slice(0, 8)}...`, 'info');
       this.sessionGenerations.delete(sessionId);
     }
 
     // Capacity check
     const activeCount = this.getActivePeerCount();
     if (activeCount >= this.maxConnections) {
-      this.log(`${ts} ❌ Rejected offer from ${sessionId.slice(0, 8)}...: at capacity`, 'error');
+      this.log(`❌ Offer rejected: at capacity`, 'error');
       return;
     }
 
     const nextGen = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
     this.sessionGenerations.set(sessionId, nextGen);
     this.pendingSessions.delete(sessionId);
-
-    this.log(
-      `${ts} 🆕 Creating peer for session ${sessionId.slice(0, 8)}... (gen ${nextGen}) — ${this.peers.size + 1}/${this.maxConnections}`,
-      'info',
-    );
 
     const capturedGen = nextGen;
 
@@ -239,19 +192,13 @@ export class MultiPeerManager extends SimpleEventEmitter {
         if (peer && peer.generation === capturedGen && capturedGen === currentGen) {
           peer.connectedAt = new Date();
           peer.lastActivity = new Date();
-          this.log(`${ts} ✅ Peer connected: ${sessionId.slice(0, 8)}... (gen ${capturedGen})`, 'success');
           this.emit('peer-connected', sessionId);
-        } else {
-          this.log(`${ts} ⚠️ peer-connected fired but generation is stale — ignoring`, 'warn');
         }
       },
       onClose: () => {
         const peer = this.peers.get(sessionId);
-        if (peer) {
-          this.log(`${ts} 🔌 Peer disconnected: ${sessionId.slice(0, 8)}...`, 'info');
-          if (this.peers.get(sessionId) === peer) {
-            this.peers.delete(sessionId);
-          }
+        if (peer && this.peers.get(sessionId) === peer) {
+          this.peers.delete(sessionId);
         }
         this.sessionGenerations.delete(sessionId);
         this.pendingSessions.delete(sessionId);
@@ -267,8 +214,6 @@ export class MultiPeerManager extends SimpleEventEmitter {
         if (peer && peer.generation === capturedGen && capturedGen === currentGen) {
           peer.lastActivity = new Date();
           this.emit('peer-data', sessionId, data);
-        } else if (peer) {
-          this.log(`${ts} ⚠️ Data from stale gen ${capturedGen} (current: ${currentGen}) — ignoring`, 'warn');
         }
       },
     });
@@ -286,7 +231,7 @@ export class MultiPeerManager extends SimpleEventEmitter {
     try {
       rtc.signal(signalData);
     } catch (err: any) {
-      this.log(`${this.ts()} ❌ Failed to deliver offer to ${sessionId.slice(0, 8)}...: ${err.message}`, 'error');
+      this.log(`❌ Failed to deliver offer: ${err.message}`, 'error');
       this.peers.delete(sessionId);
       this.sessionGenerations.delete(sessionId);
       this.pendingSessions.delete(sessionId);
@@ -305,21 +250,15 @@ export class MultiPeerManager extends SimpleEventEmitter {
       for (const [sessionId, peer] of this.peers.entries()) {
         const currentGen = this.sessionGenerations.get(sessionId);
         const timeSinceActivity = now - peer.lastActivity.getTime();
-
         const hasActiveInference = this.activeInferenceSessions?.has(sessionId);
 
         if (!hasActiveInference && timeSinceActivity > staleTimeout && peer.generation === currentGen) {
-          this.log(
-            `⏰ Session ${sessionId.slice(0, 8)}... stale (${Math.round(timeSinceActivity / 1000)}s) — disconnecting`,
-            'warn',
-          );
           this.teardownPeer(sessionId, 'heartbeat timeout');
           cleaned++;
         }
       }
 
       for (const sessionId of this.pendingSessions) {
-        this.log(`⏰ Pending session ${sessionId.slice(0, 8)}... never sent offer — clearing`, 'warn');
         this.pendingSessions.delete(sessionId);
       }
 
@@ -331,8 +270,6 @@ export class MultiPeerManager extends SimpleEventEmitter {
 
   private teardownPeer(sessionId: string, reason: string): void {
     const peer = this.peers.get(sessionId);
-    this.log(`🔌 Tearing down ${sessionId.slice(0, 8)}... (${reason})`, 'info');
-
     if (peer) {
       try {
         peer.rtc?.close();
@@ -345,47 +282,36 @@ export class MultiPeerManager extends SimpleEventEmitter {
 
   // Public API
   public sendToPeer(sessionId: string, packet: any): boolean {
-  const peer = this.peers.get(sessionId);
-  const currentGen = this.sessionGenerations.get(sessionId);
+    const peer = this.peers.get(sessionId);
+    const currentGen = this.sessionGenerations.get(sessionId);
 
-  this.log(`📤 sendToPeer called for ${sessionId.slice(0, 8)}...`, 'info');
-  this.log(`   Peer exists: ${!!peer}`, 'info');
-  this.log(`   Peer.rtc exists: ${!!peer?.rtc}`);
-  this.log(`   Peer.send exists: ${!!peer?.send}`);
-  this.log(`   Generation match: ${peer?.generation === currentGen}`);
-
-  if (peer && peer.rtc && peer.generation === currentGen) {
-    try {
-      if (typeof peer.send !== 'function') {
-        this.log(`❌ peer.send is not a function! Type: ${typeof peer.send}`);
+    if (peer && peer.rtc && peer.generation === currentGen) {
+      try {
+        if (typeof peer.send !== 'function') {
+          this.log(`❌ peer.send is not a function`, 'error');
+          return false;
+        }
+        peer.send(packet);
+        peer.lastActivity = new Date();
+        return true;
+      } catch (err: any) {
+        this.log(`❌ Failed to send: ${err.message}`, 'error');
         return false;
       }
-      peer.send(packet);
-      peer.lastActivity = new Date();
-      return true;
-    } catch (err: any) {
-      this.log(`❌ Failed to send to ${sessionId.slice(0, 8)}...: ${err.message}`);
-      return false;
     }
+    return false;
   }
-  return false;
-}
 
   public broadcast(packet: any, excludeSessionId?: string): void {
-    let sent = 0;
     for (const [sessionId, peer] of this.peers.entries()) {
       const currentGen = this.sessionGenerations.get(sessionId);
       if (sessionId !== excludeSessionId && peer.rtc && peer.generation === currentGen) {
         try {
           peer.send(packet);
-          sent++;
         } catch (err: any) {
-          this.log(`❌ Broadcast failed to ${sessionId.slice(0, 8)}...: ${err.message}`, 'error');
+          this.log(`❌ Broadcast failed: ${err.message}`, 'error');
         }
       }
-    }
-    if (sent > 0) {
-      this.log(`📡 Broadcast to ${sent} peers`, 'debug');
     }
   }
 
@@ -408,12 +334,10 @@ export class MultiPeerManager extends SimpleEventEmitter {
   }
 
   public disconnectAll(): void {
-    this.log(`🔌 Disconnecting all ${this.peers.size} peers...`, 'info');
     for (const sessionId of [...this.peers.keys()]) {
       this.teardownPeer(sessionId, 'disconnectAll');
     }
     this.pendingSessions.clear();
-    this.log('✅ All peers disconnected', 'info');
   }
 
   public close(): void {
