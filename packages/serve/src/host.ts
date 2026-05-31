@@ -212,6 +212,8 @@ If you need to reference previous information, do so naturally.`;
 
 const CURRENT_MSG_RESERVE = 500; // tokens reserved for the user's next message
 
+const activeInferenceSessions = new Set<string>();
+
 export function buildContextMessages(
   session: ClientSession,
 ): Array<{ role: string; content: string }> {
@@ -296,7 +298,7 @@ class RateLimiter {
     private windowMs: number = 60000,
     private maxRequests: number = 15,
     private maxTokensPerMinute: number = 10000,
-    private maxConcurrentInferences: number = 3,
+    private maxConcurrentInferences: number = 10,
   ) {}
 
   private getCurrentConcurrent(): number {
@@ -324,7 +326,9 @@ class RateLimiter {
     if (entry.count >= this.maxRequests)
       return {
         allowed: false,
-        reason: `Rate limit exceeded: ${this.maxRequests} req/${this.windowMs / 1000}s`,
+        reason: `Rate limit exceeded: ${this.maxRequests} req/${
+          this.windowMs / 1000
+        }s`,
         retryAfter: Math.ceil((entry.resetTime - now) / 1000),
       };
     if (entry.tokens >= this.maxTokensPerMinute)
@@ -372,7 +376,7 @@ class RateLimiter {
 
 // ─── Module-level state ───────────────────────────────────────────────────────
 
-const activeInferenceRequests = new Set<string>();
+const activeInferenceRequests = new Map<string, AbortController>();
 let bytesSentThisMinute = 0;
 let bytesReceivedThisMinute = 0;
 const clientSessions = new Map<string, ClientSession>();
@@ -398,7 +402,9 @@ const sessionManager = {
       session.conversationHistory = saved.stm;
       session.totalTokens = saved.stm.reduce((sum, e) => sum + e.tokenCount, 0);
       log(
-        `🪪 Identified ${clientId.slice(0, 12)}... — loaded ${Object.keys(saved.ltm).length} LTM facts`,
+        `🪪 Identified ${clientId.slice(0, 12)}... — loaded ${
+          Object.keys(saved.ltm).length
+        } LTM facts`,
         "info",
       );
     } else {
@@ -442,7 +448,9 @@ const sessionManager = {
     session.ltm = updated;
     saveLTM(session.clientId, updated);
     log(
-      `💡 LTM updated: ${newKeys.map((k) => `${k}="${updated[k]}"`).join(", ")}`,
+      `💡 LTM updated: ${newKeys
+        .map((k) => `${k}="${updated[k]}"`)
+        .join(", ")}`,
       "info",
     );
   },
@@ -507,7 +515,9 @@ const sessionManager = {
         stm: stmTokens,
         total: totalUsed,
         available: session.contextWindow - totalUsed - CURRENT_MSG_RESERVE,
-        utilization: `${Math.round((totalUsed / session.contextWindow) * 100)}%`,
+        utilization: `${Math.round(
+          (totalUsed / session.contextWindow) * 100,
+        )}%`,
       },
       systemPrompt: session.systemPrompt,
       ltm: session.ltm,
@@ -531,39 +541,40 @@ const sessionManager = {
 registerSessionManager(sessionManager);
 
 // Stale session cleanup
-setInterval(
-  () => {
-    const now = Date.now();
-    const SESSION_TIMEOUT = 30 * 60 * 1000;
-    let cleaned = 0;
-    for (const [peerId, session] of clientSessions.entries()) {
-      if (now - session.lastActivity.getTime() > SESSION_TIMEOUT) {
-        clientSessions.delete(peerId);
-        cleaned++;
-      }
+setInterval(() => {
+  const now = Date.now();
+  const SESSION_TIMEOUT = 30 * 60 * 1000;
+  let cleaned = 0;
+  for (const [peerId, session] of clientSessions.entries()) {
+    if (now - session.lastActivity.getTime() > SESSION_TIMEOUT) {
+      clientSessions.delete(peerId);
+      cleaned++;
     }
-    if (cleaned > 0)
-      console.log(
-        `🧹 Cleaned ${cleaned} stale sessions (${clientSessions.size} remaining)`,
-      );
-  },
-  5 * 60 * 1000,
-);
+  }
+  if (cleaned > 0)
+    console.log(
+      `🧹 Cleaned ${cleaned} stale sessions (${clientSessions.size} remaining)`,
+    );
+}, 5 * 60 * 1000);
 
 // Bandwidth tracking
 setInterval(() => {
   if (bytesSentThisMinute > 100 * 1024 * 1024)
     console.log(
-      `⚠️ High outbound: ${(bytesSentThisMinute / 1024 / 1024).toFixed(2)}MB/min`,
+      `⚠️ High outbound: ${(bytesSentThisMinute / 1024 / 1024).toFixed(
+        2,
+      )}MB/min`,
     );
   if (bytesReceivedThisMinute > 100 * 1024 * 1024)
     console.log(
-      `⚠️ High inbound:  ${(bytesReceivedThisMinute / 1024 / 1024).toFixed(2)}MB/min`,
+      `⚠️ High inbound:  ${(bytesReceivedThisMinute / 1024 / 1024).toFixed(
+        2,
+      )}MB/min`,
     );
   bytesSentThisMinute = bytesReceivedThisMinute = 0;
 }, 60000);
 
-const rateLimiter = new RateLimiter(60000, 15, 10000, 3);
+const rateLimiter = new RateLimiter(60000, 15, 10000, 10);
 setInterval(() => rateLimiter.cleanup(), 60000);
 
 // ─── Core packet dispatcher ───────────────────────────────────────────────────
@@ -580,7 +591,10 @@ async function dispatchPacket(
 ): Promise<void> {
   bytesReceivedThisMinute += JSON.stringify(packet).length;
   log(
-    `📨 [${peerId}] type=${packet.type}, requestId=${packet.requestId?.slice(0, 8)}`,
+    `📨 [${peerId}] type=${packet.type}, requestId=${packet.requestId?.slice(
+      0,
+      8,
+    )}`,
   );
 
   const limit = rateLimiter.checkLimit(peerId, packet.requestId);
@@ -600,41 +614,65 @@ async function dispatchPacket(
     const request = packet as InferenceRequest;
     request.peerId = peerId;
 
-    if (activeInferenceRequests.has(request.requestId)) {
-      log(`⚠️ Duplicate inference from ${peerId} — ignoring`, "warn");
-      send({
-        type: "error",
-        requestId: request.requestId,
-        error: "Duplicate request already processing",
-        code: "DUPLICATE_REQUEST",
-      });
-      return;
+    // Cancel any pending inference from this peer (key by peerId, not requestId)
+    const existingController = activeInferenceRequests.get(peerId);
+    if (existingController) {
+      log(`🛑 Cancelling previous inference for ${peerId}`, "warn");
+      existingController.abort();
+      activeInferenceRequests.delete(peerId);
     }
 
-    if (!clientSessions.has(peerId))
-      clientSessions.set(peerId, createClientSession(peerId, contextWindow));
-
-    activeInferenceRequests.add(request.requestId);
+    // Create new abort controller
+    const controller = new AbortController();
+    activeInferenceRequests.set(peerId, controller);
+    activeInferenceSessions.add(peerId);
 
     const sendTracked = (response: any) => {
       bytesSentThisMinute += JSON.stringify(response).length;
-      if (response.type === "token")
+      if (response.type === "token") {
         rateLimiter.addTokens(peerId, Math.ceil(response.token.length / 4));
+      }
       send(response);
     };
 
+    // Better FIM detection (Continue's autocomplete format)
+    const isFIMRequest = packet.messages?.some(
+      (msg: any) =>
+        msg.content?.includes("<fim_prefix>") ||
+        msg.content?.includes("fim_prefix") ||
+        packet.prefix, // Some versions use separate fields
+    );
+
     try {
-      await handleOllamaInference(request, sendTracked, log, ollamaModel);
+      // Pass the abort signal to your inference function
+      // You'll need to modify handleOllamaInference to accept this signal
+      await handleOllamaInference(
+        request,
+        sendTracked,
+        log,
+        ollamaModel,
+        controller.signal, // ← Add this parameter
+      );
     } catch (error: any) {
-      log(`❌ Inference error for ${peerId}: ${error.message}`, "error");
-      send({
-        type: "error",
-        requestId: request.requestId,
-        error: error.message,
-        code: "INFERENCE_FAILED",
-      });
+      // Check if this was an abort error
+      if (error.name === "AbortError") {
+        log(`🛑 Inference cancelled for ${peerId}`, "info");
+        // Don't send error response for cancelled requests
+      } else {
+        log(`❌ Inference error for ${peerId}: ${error.message}`, "error");
+        send({
+          type: "error",
+          requestId: request.requestId,
+          error: error.message,
+          code: "INFERENCE_FAILED",
+        });
+      }
     } finally {
-      activeInferenceRequests.delete(request.requestId);
+      // Clean up
+      if (activeInferenceRequests.get(peerId) === controller) {
+        activeInferenceRequests.delete(peerId);
+      }
+      activeInferenceSessions.delete(peerId);
     }
   } else if (packet.type === "command") {
     log(`📟 Command from ${peerId}: ${packet.command}`, "info");
@@ -710,7 +748,9 @@ export async function startHost(options: HostOptions) {
   log(`   Context Window:  ${contextWindow} tokens per client`, "info");
   log(`   Local socket:    always enabled`, "info");
   log(
-    `   Switchboard:     ${localOnly ? "disabled (local-only mode)" : "enabled"}`,
+    `   Switchboard:     ${
+      localOnly ? "disabled (local-only mode)" : "enabled"
+    }`,
     "info",
   );
 
@@ -1165,22 +1205,22 @@ export async function startHost(options: HostOptions) {
 
   return {
     disconnect: () => {
-        // Remove event listeners first to prevent callbacks on null
-        if (peerManager) {
-            peerManager.removeAllListeners(); // Add this line
-            peerManager.close();
-            peerManager = null;
-        }
-        if (socketClient) { 
-            socketClient.disconnect(); 
-            socketClient = null; 
-        }
-        if (localServer) { 
-            localServer.close(); 
-            localServer = null; 
-        }
-        activeInferenceRequests.clear();
-        clientSessions.clear();
+      // Remove event listeners first to prevent callbacks on null
+      if (peerManager) {
+        peerManager.removeAllListeners(); // Add this line
+        peerManager.close();
+        peerManager = null;
+      }
+      if (socketClient) {
+        socketClient.disconnect();
+        socketClient = null;
+      }
+      if (localServer) {
+        localServer.close();
+        localServer = null;
+      }
+      activeInferenceRequests.clear();
+      clientSessions.clear();
     },
     getPeerCount: () => peerManager?.getPeerCount() || 0,
     getPeers: () => peerManager?.getPeers() || [],

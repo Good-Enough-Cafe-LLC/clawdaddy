@@ -233,6 +233,98 @@ async function handleAnthropicMessages(req: http.IncomingMessage, res: http.Serv
     });
 }
 
+async function handleLegacyCompletions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    const body   = await readBody(req);
+    const parsed = parseBody(body, res);
+    if (!parsed) return;
+
+    const stream = parsed.stream !== false;
+
+    // Non-streaming fallback
+    if (!stream) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            id: generateUUID(),
+            object: 'text_completion',
+            created: Math.floor(Date.now() / 1000),
+            model: parsed.model || 'clawdaddy',
+            choices: [{
+                text: '',
+                index: 0,
+                logprobs: null,
+                finish_reason: 'stop'
+            }],
+            usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        }));
+        return;
+    }
+
+    if (!requirePeer(res)) return;
+
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' });
+
+    const requestId = generateUUID();
+    let firstToken = true;
+    let fullText = '';
+
+    pendingRequests.set(requestId, {
+        inputTokens: 0,
+        onToken: (token) => {
+            fullText += token;
+            // Legacy completions format: choices[0].text (not delta)
+            res.write(`data: ${JSON.stringify({
+                id: requestId,
+                object: 'text_completion',
+                created: Math.floor(Date.now() / 1000),
+                model: parsed.model || 'clawdaddy',
+                choices: [{
+                    text: token,  // <-- legacy format sends the delta as "text"
+                    index: 0,
+                    logprobs: null,
+                    finish_reason: null,
+                }],
+            })}\n\n`);
+            if ((res as any).flush) (res as any).flush();
+        },
+        onDone: () => {
+            res.write(`data: ${JSON.stringify({
+                id: requestId,
+                object: 'text_completion',
+                created: Math.floor(Date.now() / 1000),
+                model: parsed.model || 'clawdaddy',
+                choices: [{
+                    text: '',  // empty final delta
+                    index: 0,
+                    logprobs: null,
+                    finish_reason: 'stop',
+                }],
+            })}\n\n`);
+            res.write(`data: [DONE]\n\n`);
+            res.end();
+            pendingRequests.delete(requestId);
+        },
+        onError: (err) => {
+            res.write(`data: ${JSON.stringify({ error: err })}\n\n`);
+            res.end();
+            pendingRequests.delete(requestId);
+        },
+    });
+
+    // Convert the legacy "prompt" to chat messages format
+    const prompt = parsed.prompt || '';
+    const messages = [{ role: 'user', content: prompt }];
+
+    sendSecure({
+        type: 'inference',
+        requestId,
+        messages,
+        options: {
+            max_tokens: parsed.max_tokens ?? 256,
+            temperature: parsed.temperature ?? 0.7,
+        },
+    });
+}
+
 async function handleOpenAICompletions(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     const body   = await readBody(req);
     const parsed = parseBody(body, res);
@@ -322,6 +414,7 @@ export function startApiMode(
         if (req.method === 'POST' && pathname === '/v1/command')          return handleCommand(req, res);
         if (req.method === 'POST' && pathname === '/v1/messages')         return handleAnthropicMessages(req, res);
         if (req.method === 'POST' && pathname === '/v1/chat/completions') return handleOpenAICompletions(req, res);
+        if (req.method === 'POST' && pathname === '/v1/completions')      return handleLegacyCompletions(req, res);
 
         if (req.method === 'GET' && pathname === '/v1/models') {
             res.writeHead(200, { 'Content-Type': 'application/json' });

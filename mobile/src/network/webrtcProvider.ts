@@ -2,9 +2,13 @@ import {
   RTCPeerConnection,
   RTCIceCandidate,
   RTCSessionDescription,
-  RTCDataChannel,
 } from 'react-native-webrtc';
-import { computeHMAC, verifyHMAC, reassemble, ChunkFrame } from '@clawdaddy/core';
+import {
+  computeHMAC,
+  verifyHMAC,
+  reassemble,
+  ChunkFrame,
+} from '@clawdaddy/core';
 
 // ─── createWebRTC ─────────────────────────────────────────────────────────────
 //
@@ -26,13 +30,13 @@ export const createWebRTC = ({
   onClose,
   log,
 }: {
-  socket:    any;
-  authHash:  string;
+  socket: any;
+  authHash: string;
   sharedKey: string;
-  onData:    (data: any) => void;
-  onOpen:    () => void;
-  onClose:   () => void;
-  log:       (msg: string, type?: any) => void;
+  onData: (data: any) => void;
+  onOpen: () => void;
+  onClose: () => void;
+  log: (msg: string, type?: any) => void;
 }) => {
   const pc = new RTCPeerConnection({
     iceServers: [
@@ -41,25 +45,22 @@ export const createWebRTC = ({
     ],
   });
 
-  let dataChannel:  RTCDataChannel | null = null;
-  let isConnected   = false;
-  let currentSession: string | null = null;  // sessionId of the connected client
+  // Use 'any' type for data channel since RTCDataChannel isn't exported
+  let dataChannel: any = null;
+  let isConnected = false;
+  let currentSession: string | null = null; // sessionId of the connected client
 
-  // ── ICE candidates ────────────────────────────────────────────────────────
-  // Send candidates back to the client using sessionId as the routing key.
-  // The switchboard routes by sessionId + our socket identity (server).
-  pc.onicecandidate = ({ candidate }: any) => {
+  pc.addEventListener('icecandidate', (event: any) => {
+    const candidate = event.candidate;
     if (!candidate || !currentSession) return;
     socket.emit('signal', {
-      sessionId:  currentSession,
+      sessionId: currentSession,
       signalData: { candidate: candidate.toJSON() },
     });
-  };
+  });
 
-  // ── Connection state ──────────────────────────────────────────────────────
-  pc.onconnectionstatechange = () => {
+  pc.addEventListener('connectionstatechange', () => {
     log(`Connection state: ${pc.connectionState}`);
-
     if (pc.connectionState === 'connected') {
       if (!isConnected) {
         isConnected = true;
@@ -75,27 +76,24 @@ export const createWebRTC = ({
       }
       currentSession = null;
     }
-  };
+  });
 
-  // ── Data channel ──────────────────────────────────────────────────────────
-  // Mobile is the receiver, so the data channel is created by the initiator
-  // (CLI/web) and we receive it here via ondatachannel.
-  pc.ondatachannel = ({ channel }: any) => {
+  pc.addEventListener('datachannel', (event: any) => {
     log('📨 Incoming data channel');
-    dataChannel = channel;
-    setupDataChannel(channel);
-  };
+    dataChannel = event.channel;
+    setupDataChannel(event.channel);
+  });
 
-  const setupDataChannel = (channel: RTCDataChannel) => {
+  const setupDataChannel = (channel: any) => {
     // Chunk reassembly buffer — matches the frame format used by @clawdaddy/core
     channel.onmessage = ({ data }: any) => {
       try {
-        const raw    = typeof data === 'string' ? data : data.toString();
+        const raw = typeof data === 'string' ? data : data.toString();
         const parsed = JSON.parse(raw);
 
         // ── Chunk frame path ──────────────────────────────────────────────
         if (
-          typeof parsed.id    === 'string' &&
+          typeof parsed.id === 'string' &&
           typeof parsed.index === 'number' &&
           typeof parsed.total === 'number'
         ) {
@@ -165,7 +163,6 @@ export const createWebRTC = ({
 
         log(`📞 Sending answer (session: ${sessionId.slice(0, 8)}...)`, 'info');
         socket.emit('signal', { sessionId, signalData: answer });
-
       } else if (signalData.candidate) {
         await pc.addIceCandidate(new RTCIceCandidate(signalData.candidate));
       }
@@ -186,7 +183,7 @@ export const createWebRTC = ({
       return;
     }
 
-    const signature  = computeHMAC(sharedKey, packet);
+    const signature = computeHMAC(sharedKey, packet);
     const securePacket = { payload: packet, signature };
     dataChannel.send(JSON.stringify(securePacket));
   };
@@ -194,8 +191,15 @@ export const createWebRTC = ({
   // ── Cleanup ───────────────────────────────────────────────────────────────
   const close = () => {
     socket.off('signal', handleSignal);
-    if (dataChannel) { try { dataChannel.close(); } catch (_) { } }
-    try { pc.close(); } catch (_) { }
+    if (dataChannel) {
+      try {
+        dataChannel.close();
+      } catch (_) {}
+      dataChannel = null;
+    }
+    try {
+      pc.close();
+    } catch (_) {}
     currentSession = null;
   };
 

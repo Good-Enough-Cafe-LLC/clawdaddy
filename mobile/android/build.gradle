@@ -1,6 +1,7 @@
 buildscript {
     ext {
-        buildToolsVersion = "34.0.0"
+        // Remove buildToolsVersion — AGP handles this automatically
+        buildToolsVersion = "35.0.0" 
         minSdkVersion = 24
         compileSdkVersion = 36
         targetSdkVersion = 36
@@ -12,7 +13,9 @@ buildscript {
         mavenCentral()
     }
     dependencies {
-        classpath("com.android.tools.build:gradle:8.3.2")
+        // Match AGP to your Gradle version
+        // Gradle 9.3.1 (from your logs) needs AGP 8.12.0+
+        classpath("com.android.tools.build:gradle:8.12.0")
         classpath("com.facebook.react:react-native-gradle-plugin")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion")
     }

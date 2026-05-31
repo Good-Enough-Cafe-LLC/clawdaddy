@@ -1,0 +1,45 @@
+name: Clawdaddy Config
+version: 1.0.0
+schema: v1
+models:
+  - name: Llama 3.1 8B
+    provider: ollama
+    model: llama3.1:8b
+    roles:
+      - chat
+      - edit
+      - apply
+  - name: Qwen2.5-Coder 1.5B
+    provider: ollama
+    model: qwen2.5-coder:1.5b-base
+    roles:
+      - autocomplete
+  - name: Nomic Embed
+    provider: ollama
+    model: nomic-embed-text:latest
+    roles:
+      - embed
+  - name: Clawdaddy Local
+    provider: openai
+    model: clawdaddy
+    apiKey: not-needed
+    apiBase: http://127.0.0.1:3001/v1  # Reverted to apiBase
+    roles:
+      - chat
+      - edit
+  - name: Clawdaddy Tab
+    provider: openai
+    model: clawdaddy
+    apiKey: not-needed
+    apiBase: http://127.0.0.1:3001/v1  # Reverted to apiBase
+    roles:
+      - autocomplete
+    completionOptions:
+      debounceDelay: 500
+      useLegacyCompletions: false
+
+completionOptions:
+  temperature: 0.7
+  maxTokens: 1024
+ui:
+  fontSize: 14

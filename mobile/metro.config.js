@@ -39,6 +39,8 @@ const config = {
     extraNodeModules: {
       react:        path.resolve(__dirname, 'node_modules/react'),
       'react-native': path.resolve(__dirname, 'node_modules/react-native'),
+      path: require.resolve('path-browserify'),
+      os: require.resolve('os-browserify'),
     },
   },
 };

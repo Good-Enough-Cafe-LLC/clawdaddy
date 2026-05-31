@@ -10,11 +10,13 @@
     "test": "jest"
   },
   "dependencies": {
-    "@clawdaddy/core": "*",
+    "@clawdaddy/core": "file:../packages/core",
     "@react-native/new-app-screen": "0.85.1",
     "buffer": "^6.0.3",
     "events": "^3.3.0",
     "llama.rn": "^0.12.0-rc.9",
+    "os-browserify": "^0.3.0",
+    "path-browserify": "^1.0.1",
     "process": "^0.11.10",
     "react": "19.2.3",
     "react-native": "0.85.1",
@@ -34,7 +36,7 @@
     "@babel/core": "^7.25.2",
     "@babel/preset-env": "^7.25.3",
     "@babel/runtime": "^7.25.0",
-    "@react-native-community/cli": "latest",
+    "@react-native-community/cli": "^20.1.3",
     "@react-native-community/cli-platform-android": "20.1.0",
     "@react-native-community/cli-platform-ios": "20.1.0",
     "@react-native/babel-preset": "0.85.1",

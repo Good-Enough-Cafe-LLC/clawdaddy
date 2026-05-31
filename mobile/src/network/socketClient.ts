@@ -51,7 +51,7 @@ export const createSocketClient = ({
   log('🔐 PHONE DEBUG:');
   log(`   Phone ID:     ${normalizedPhoneId}`);
   log(`   Pairing Code: ${normalizedPairingCode}`);
-  log(`   Auth Hash:    ${authHash.slice(0, 16)}...`);
+  log(`   Auth Hash:    ${authHash.slice(0, 16)}...`); 
 
   const scheduleReconnect = () => {
     if (destroyed || reconnectTimer) return;

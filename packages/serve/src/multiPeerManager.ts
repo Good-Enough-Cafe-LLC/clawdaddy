@@ -43,8 +43,9 @@ export class MultiPeerManager extends EventEmitter {
   private log: (msg: string, type?: string) => void;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private _isClosing: boolean = false; 
+  private activeInferenceSessions?: Set<string>;
 
-  constructor(options: MultiPeerManagerOptions) {
+  constructor(options: MultiPeerManagerOptions & { activeInferenceSessions?: Set<string> }) {
     super();
     this.socket = options.socket;
     this.authHash = options.authHash;
@@ -54,6 +55,7 @@ export class MultiPeerManager extends EventEmitter {
 
     this.setupSocketHandlers();
     this.startHeartbeat();
+    this.activeInferenceSessions = options.activeInferenceSessions;
   }
 
   // ── Socket handlers ───────────────────────────────────────────────────────
@@ -174,6 +176,24 @@ export class MultiPeerManager extends EventEmitter {
 
   private handleOffer(sessionId: string, signalData: any): void {
     const ts = this.ts();
+
+    const hasActiveInference = this.activeInferenceSessions?.has(sessionId);
+
+    if (hasActiveInference) {
+        this.log(`${ts} 🔄 Client reconnecting during active inference for ${sessionId.slice(0, 8)}...`, 'warn');
+        
+        // Don't create new generation - reuse existing
+        const existingPeer = this.peers.get(sessionId);
+        if (existingPeer) {
+            // Just update the WebRTC connection
+            try {
+                existingPeer.rtc?.signal(signalData);
+                return;
+            } catch (err) {
+                this.log(`${ts} Failed to reconnect, will create new`, 'warn');
+            }
+        }
+    }
 
     // FORCEFUL cleanup - don't wait for callbacks
     const existingPeer = this.peers.get(sessionId);
@@ -338,17 +358,16 @@ export class MultiPeerManager extends EventEmitter {
   private startHeartbeat(): void {
     this.heartbeatInterval = setInterval(() => {
       const now = Date.now();
-      const staleTimeout = 60_000;
+      const staleTimeout = 300_000;
       let cleaned = 0;
 
       for (const [sessionId, peer] of this.peers.entries()) {
         const currentGen = this.sessionGenerations.get(sessionId);
         const timeSinceActivity = now - peer.lastActivity.getTime();
-
-        if (
-          timeSinceActivity > staleTimeout &&
-          peer.generation === currentGen
-        ) {
+        
+        const hasActiveInference = this.activeInferenceSessions?.has(sessionId);
+            
+            if (!hasActiveInference && timeSinceActivity > staleTimeout && peer.generation === currentGen) {
           this.log(
             `⏰ Session ${sessionId.slice(0, 8)}... stale (${Math.round(timeSinceActivity / 1000)}s) — disconnecting`,
             "warn",

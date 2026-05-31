@@ -20,14 +20,20 @@ import {
 } from 'react-native';
 import { initLlama, LlamaContext } from 'llama.rn';
 import RNFS from 'react-native-fs';
+import { 
+  loadClientSession, 
+  saveClientSession, 
+  extractLTMFacts, 
+  formatLTM, 
+  ClientSession 
+} from './src/session/sessionManager';
+import { estimateTokens } from './src/session/tokenEstimator';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const SIGNAL_SERVER = 'https://clawdaddyswitch01.goodenoughcafe.com';
 const CONFIG_PATH = `${RNFS.DocumentDirectoryPath}/clawdaddy.config.json`;
 const MODES_PATH = `${RNFS.DocumentDirectoryPath}/clawdaddy.modes.json`;
 const { width: SCREEN_W } = Dimensions.get('window');
-
-
 
 const normalizePairingCode = (code: string): string => {
   const cleaned = code.trim().toUpperCase().replace(/\s+/g, '');
@@ -36,7 +42,6 @@ const normalizePairingCode = (code: string): string => {
   }
   return cleaned;
 };
-
 
 const generateNodeId = () => {
   const hex = Math.floor(Math.random() * 0x100000000).toString(16).padStart(8, '0').toUpperCase();
@@ -49,8 +54,6 @@ const generatePairingCode = () => {
   const part2 = Array(4).fill(0).map(() => chars[Math.floor(Math.random() * chars.length)]).join('');
   return `${part1}-${part2}`;
 };
-
-
 
 const MODEL_DOWNLOAD_URL = 'https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf';
 const MODEL_FILENAME = 'gemma4-e2b-q4.gguf';
@@ -126,6 +129,9 @@ const App = () => {
   const [pairingCode, setPairingCode] = useState('');
   const [showPairingCode, setShowPairingCode] = useState(false);
 
+  // Client sessions (per connected client) — use ref because UI doesn't need to re-render on changes
+  const clientSessionsRef = useRef<Map<string, ClientSession>>(new Map());
+
   // Swipe / page
   const [page, setPage] = useState(0);
   const pageScrollRef = useRef<ScrollView>(null);
@@ -162,25 +168,6 @@ const App = () => {
     setTimeout(() => logScrollRef.current?.scrollToEnd({ animated: true }), 50);
   }, []);
 
-  const backgroundOptions = {
-    taskName: 'ClawdaddyNode',
-    taskTitle: 'Clawdaddy is active',
-    taskDesc: 'Providing AI inference to the network',
-    taskIcon: { name: 'ic_launcher', type: 'mipmap' },
-    color: '#ef4444',
-  };
-
-  // This function just loops forever to keep the JS engine from sleeping
-  const backgroundTask = async (taskData: any) => {
-    await new Promise(async (resolve) => {
-      while (BackgroundService.isRunning()) {
-        // Heartbeat log (optional)
-        // console.log('Background task running...');
-        await new Promise(r => setTimeout(r, 5000));
-      }
-    });
-  };
-
   // ── Boot ──────────────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
@@ -199,7 +186,7 @@ const App = () => {
         const config = configExists ? JSON.parse(await RNFS.readFile(CONFIG_PATH, 'utf8')) : {};
         const savedId = config.nodeId ?? generateNodeId();
         const savedCode = config.pairingCode ? normalizePairingCode(config.pairingCode) : generatePairingCode();
-        
+
         setPhoneId(savedId);
         setPairingCode(savedCode);
 
@@ -330,14 +317,10 @@ const App = () => {
     if (!active || !phoneId) {
       clientRef.current?.disconnect(); clientRef.current = null;
       setConnected(false);
-      BackgroundService.stop();
-      //addLog('Background Service Stopped', 'info');
       if (!active) addLog('Node offline.', 'info');
       return;
     }
 
-    // BackgroundService.start(backgroundTask, backgroundOptions);
-    // addLog('Background Service Started', 'info');
     const client = createSocketClient({
       url: SIGNAL_SERVER,
       phoneId,
@@ -347,64 +330,324 @@ const App = () => {
       onTunnelOpen: () => { setConnected(true); addLog('Tunnel active · P2P', 'success'); },
       onTunnelClose: () => setConnected(false),
       log: addLog,
-      onPacket: (packet, send) => {
+      onPacket: async (packet, send) => {
         switch (packet.type) {
           case 'inference': {
+            const clientId = packet.clientId;
+            const session = clientId ? clientSessionsRef.current.get(clientId) : null;
+            
+            // Buffer for this request's assistant response
+            let assistantResponse = '';
+
+            // Build context from session if available
+            let messages = packet.messages;
+            if (session) {
+              // Inject LTM as system context
+              const ltmText = formatLTM(session.ltm);
+              const systemWithLTM = ltmText
+                ? `${session.systemPrompt}\n\n## What I know about you:\n${ltmText}`
+                : session.systemPrompt;
+
+              messages = [
+                { role: 'system', content: systemWithLTM },
+                ...session.conversationHistory.map(m => ({ role: m.role, content: m.content })),
+                ...packet.messages,
+              ];
+
+              // Update session with new user message
+              const userMsg = packet.messages[packet.messages.length - 1];
+              if (userMsg?.role === 'user') {
+                session.conversationHistory.push({
+                  role: 'user',
+                  content: userMsg.content,
+                  timestamp: Date.now(),
+                  tokenCount: estimateTokens(userMsg.content),
+                });
+
+                // Extract LTM facts
+                const { updated, newKeys } = extractLTMFacts(userMsg.content, session.ltm);
+                if (newKeys.length > 0) {
+                  session.ltm = updated;
+                  addLog(`💡 LTM extracted: ${newKeys.join(', ')}`, 'info');
+                }
+                session.totalTokens += estimateTokens(userMsg.content);
+                await saveClientSession(session);
+              }
+            }
+
             const mode = modesRef.current.find(m => m.id === activeModeIdRef.current) ?? DEFAULT_MODE;
+
+            // Wrap send to capture assistant response for session storage
+            const wrappedSend = (pkt: any) => {
+              // Forward to remote client
+              send(pkt);
+              
+              // Capture assistant response tokens for local session
+              if (pkt.type === 'token') {
+                assistantResponse += pkt.token;
+              }
+            };
+
             runInference({
-              request: { ...packet, activeMode: mode }, llama: llamaRef.current, send,
+              request: { ...packet, messages, activeMode: mode },
+              llama: llamaRef.current,
+              send: wrappedSend,
               isBusy: () => inferringRef.current,
               onStart: () => { setInferring(true); inferringRef.current = true; },
-              onEnd: () => { setInferring(false); inferringRef.current = false; },
+              onEnd: async () => {
+                setInferring(false);
+                inferringRef.current = false;
+                
+
+                // Save assistant response to session
+                if (session && assistantResponse) {
+
+                  session.conversationHistory.push({
+                    role: 'assistant',
+                    content: assistantResponse,
+                    timestamp: Date.now(),
+                    tokenCount: estimateTokens(assistantResponse),
+                  });
+                  session.totalTokens += estimateTokens(assistantResponse);
+                  await saveClientSession(session);
+                  addLog(`💾 Saved conversation to session (${session.conversationHistory.length} messages)`);
+                  
+                }
+              },
               onLog: addLog,
             });
             break;
           }
+
           case 'command': {
             const { requestId, command, payload } = packet;
+
             switch (command) {
+              case 'identify': {
+                const { clientId } = payload ?? {};
+
+                if (!clientId || typeof clientId !== 'string' || clientId.length < 8) {
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: 'clientId must be a string of at least 8 characters'
+                  });
+                  break;
+                }
+
+                let session = clientSessionsRef.current.get(clientId);
+
+                if (!session) {
+                  const loaded = await loadClientSession(clientId);
+
+                  if (loaded) {
+                    session = loaded;
+                    addLog(
+                      `🪪 Client ${clientId.slice(0, 12)}... identified — loaded ${Object.keys(loaded.ltm).length} LTM facts`,
+                      'info'
+                    );
+                  } else {
+                    session = {
+                      clientId,
+                      systemPrompt: `You are a helpful, friendly assistant.`,
+                      ltm: {},
+                      conversationHistory: [],
+                      totalTokens: 0,
+                      lastActivity: Date.now(),
+                      contextWindow: 4096,
+                    };
+                    addLog(
+                      `🪪 Client ${clientId.slice(0, 12)}... identified — new session`,
+                      'info'
+                    );
+                  }
+
+                  clientSessionsRef.current.set(clientId, session);
+                }
+
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: {
+                    success: true,
+                    ltmFacts: Object.keys(session.ltm).length
+                  }
+                });
+                break;
+              }
+
+              case 'get_memory': {
+                const session = clientSessionsRef.current.get(payload?.clientId || '');
+
+                if (!session) {
+                  send({
+                    type: 'command_result',
+                    requestId,
+                    result: { hasSession: false }
+                  });
+                  break;
+                }
+
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: {
+                    hasSession: true,
+                    clientId: session.clientId.slice(0, 12) + '...',
+                    contextWindow: session.contextWindow,
+                    usage: {
+                      stm: session.totalTokens,
+                      ltm: Object.values(session.ltm).reduce((sum, v) => sum + estimateTokens(v), 0),
+                    },
+                    ltm: session.ltm,
+                    stm: {
+                      messageCount: session.conversationHistory.length
+                    },
+                  }
+                });
+                break;
+              }
+
+              case 'clear_memory': {
+                const session = clientSessionsRef.current.get(payload?.clientId || '');
+
+                if (session) {
+                  session.conversationHistory = [];
+                  session.totalTokens = 0;
+                  await saveClientSession(session);
+                  send({
+                    type: 'command_result',
+                    requestId,
+                    result: { success: true, messagesCleared: true }
+                  });
+                } else {
+                  send({
+                    type: 'command_result',
+                    requestId,
+                    result: { success: true, messagesCleared: false }
+                  });
+                }
+                break;
+              }
+
               case 'get_modes':
-                send({ type: 'command_result', requestId, result: modesRef.current }); break;
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: modesRef.current
+                });
+                break;
+
               case 'upsert_mode': {
                 const inc = payload as Mode;
+
                 if (modesRef.current.find(m => m.id === inc.id)?.locked) {
-                  send({ type: 'command_error', requestId, error: `Mode "${inc.id}" is locked.` }); break;
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: `Mode "${inc.id}" is locked.`
+                  });
+                  break;
                 }
-                const up = [...modesRef.current.filter(m => m.id !== inc.id), inc];
-                setModes(up); persistUserModes(up);
-                send({ type: 'command_result', requestId, result: { ok: true } });
-                addLog(`Mode saved: ${inc.name}`, 'info'); break;
+
+                const up = [
+                  ...modesRef.current.filter(m => m.id !== inc.id),
+                  inc
+                ];
+
+                setModes(up);
+                persistUserModes(up);
+
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { ok: true }
+                });
+
+                addLog(`Mode saved: ${inc.name}`, 'info');
+                break;
               }
+
               case 'delete_mode': {
                 const tid = payload as string;
                 const t = modesRef.current.find(m => m.id === tid);
-                if (!t) { send({ type: 'command_error', requestId, error: 'Not found.' }); break; }
-                if (t.locked) { send({ type: 'command_error', requestId, error: 'Locked.' }); break; }
+
+                if (!t) {
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: 'Not found.'
+                  });
+                  break;
+                }
+
+                if (t.locked) {
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: 'Locked.'
+                  });
+                  break;
+                }
+
                 const up = modesRef.current.filter(m => m.id !== tid);
-                setModes(up); persistUserModes(up);
-                if (activeModeIdRef.current === tid) setActiveModeId('default');
-                send({ type: 'command_result', requestId, result: { ok: true } }); break;
+                setModes(up);
+                persistUserModes(up);
+
+                if (activeModeIdRef.current === tid) {
+                  setActiveModeId('default');
+                }
+
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { ok: true }
+                });
+                break;
               }
+
               case 'set_active_mode': {
                 const nid = payload as string;
                 const f = modesRef.current.find(m => m.id === nid);
-                if (!f) { send({ type: 'command_error', requestId, error: 'Not found.' }); break; }
+
+                if (!f) {
+                  send({
+                    type: 'command_error',
+                    requestId,
+                    error: 'Not found.'
+                  });
+                  break;
+                }
+
                 setActiveModeId(nid);
-                send({ type: 'command_result', requestId, result: { ok: true } });
-                addLog(`Mode → ${f.icon ?? ''} ${f.name}`, 'info'); break;
+                send({
+                  type: 'command_result',
+                  requestId,
+                  result: { ok: true }
+                });
+                addLog(`Mode → ${f.icon ?? ''} ${f.name}`, 'info');
+                break;
               }
-              default: handleCommand({ request: packet, send, onLog: addLog });
+
+              default:
+                handleCommand({
+                  request: packet,
+                  send,
+                  onLog: addLog
+                });
             }
             break;
           }
-          default: addLog(`Unknown packet: ${packet.type}`, 'error');
+
+          default:
+            addLog(`Unknown packet: ${packet.type}`, 'error');
         }
       },
     });
 
     clientRef.current = client;
     return () => { client.disconnect(); clientRef.current = null; setConnected(false); };
-  }, [active, phoneId, addLog]);
+  }, [active, phoneId, pairingCode, addLog, persistUserModes]);
 
   // ── Local adapter ─────────────────────────────────────────────────────────
   const localAdapter = useRef(
@@ -466,7 +709,7 @@ const App = () => {
   const pairModel = async (path: string) => {
     try {
       addLog('Loading model…', 'info');
-      llamaRef.current = await initLlama({ model: path, n_ctx: 4096, n_threads: 4, n_gpu_layers: 1, n_batch: 512 });
+      llamaRef.current = await initLlama({ model: path, n_ctx: 4096, n_threads: 4, n_gpu_layers: 1, n_batch: 512 } as any);
       await RNFS.writeFile(CONFIG_PATH, JSON.stringify({ modelPath: path }), 'utf8');
       setModelPath(path); setPhase('ready');
       addLog('Model loaded and ready.', 'success');
@@ -511,14 +754,6 @@ const App = () => {
     <SafeAreaView style={s.root}>
       <StatusBar barStyle="light-content" backgroundColor="#0a0a0a" />
 
-      {/*
-        KeyboardAvoidingView is intentionally placed here — outside the
-        horizontal paged ScrollView. On iOS, KAV must be an ancestor that
-        has direct knowledge of the screen height. Nesting it inside a
-        horizontal ScrollView breaks the height calculation and the keyboard
-        covers the input bar. Being here, it compresses the whole layout
-        upward when the keyboard opens, which is exactly what we want.
-      */}
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
@@ -542,9 +777,6 @@ const App = () => {
             <TouchableOpacity onPress={() => goToPage(1)} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
               <View style={[s.dot, page === 1 && s.dotActive]} />
             </TouchableOpacity>
-            {/* <Animated.Text style={[s.swipeHint, { transform: [{ translateX: hintTranslate }] }]}>
-              swipe for chat
-            </Animated.Text> */}
           </View>
 
           {/* ── Pages ── */}
@@ -603,7 +835,7 @@ const App = () => {
                     </TouchableOpacity>
                   </View>
 
-                  {/* Pairing Code row (NEW) */}
+                  {/* Pairing Code row */}
                   <View style={s.idRow}>
                     <Text style={s.idLabel}>PAIRING CODE</Text>
                     <Text style={s.idValue}>
@@ -672,7 +904,7 @@ const App = () => {
             {/* ══ PAGE 1 · CLIENT ══════════════════════════════════════════ */}
             <View style={[s.page, { width: SCREEN_W }]}>
 
-              {/* ── Mode picker strip (now wraps) ── */}
+              {/* ── Mode picker strip ── */}
               <View style={s.modePickerBar}>
                 <View style={s.modePicker}>
                   {modes.map(m => (
@@ -703,7 +935,6 @@ const App = () => {
                     style={[s.modeChip, s.modeChipNew, isNewMode && s.modeChipActive]}
                     onPress={() => isNewMode ? closeEdit() : openNew()}
                   >
-                    {/* <Text style={s.modeChipIcon}>{isNewMode ? '✕' : '+'}</Text> */}
                     <Text style={s.modeChipName}>{isNewMode ? 'cancel' : 'new'}</Text>
                   </TouchableOpacity>
                 </View>
@@ -713,7 +944,6 @@ const App = () => {
               {editing !== null && (
                 <View style={s.editorPanel}>
                   <View style={s.editorRow}>
-                    {/* Icon field */}
                     <TextInput
                       style={s.editorIconInput}
                       value={editIcon}
@@ -722,7 +952,6 @@ const App = () => {
                       placeholder="🤖"
                       placeholderTextColor="#3f3f46"
                     />
-                    {/* Name field */}
                     <TextInput
                       style={[s.editorInput, { flex: 1 }]}
                       value={editName}
@@ -732,7 +961,6 @@ const App = () => {
                       autoCapitalize="words"
                     />
                   </View>
-                  {/* System prompt */}
                   <TextInput
                     style={[s.editorInput, s.editorPromptInput]}
                     value={editPrompt}
@@ -742,7 +970,6 @@ const App = () => {
                     multiline
                     numberOfLines={3}
                   />
-                  {/* Action row */}
                   <View style={s.editorActions}>
                     {!isNewMode && (
                       <TouchableOpacity
@@ -814,7 +1041,7 @@ const App = () => {
                   returnKeyType="send"
                   onSubmitEditing={sendLocalMessage}
                   blurOnSubmit={false}
-                  onFocus={() => setEditing(null)} // close editor when keyboard opens
+                  onFocus={() => setEditing(null)}
                 />
                 <TouchableOpacity
                   style={[s.sendBtn, (!llamaRef.current || clientInferring || !inputText.trim()) && s.sendBtnDisabled]}
@@ -826,7 +1053,6 @@ const App = () => {
               </View>
 
             </View>
-            {/* ════════════════════════════════════════════════════════════ */}
 
           </ScrollView>
         </Animated.View>
@@ -841,19 +1067,16 @@ const s = StyleSheet.create({
   container: { flex: 1 },
   page: { flex: 1 },
 
-  // Header
   header: { alignItems: 'center', paddingTop: 44, paddingBottom: 6 },
   logo: { fontSize: 38, marginBottom: 4 },
   title: { fontSize: 24, fontWeight: '900', color: '#ef4444', letterSpacing: 8 },
   subtitle: { fontSize: 10, color: '#52525b', letterSpacing: 4, marginTop: 2, textTransform: 'uppercase' },
 
-  // Page indicator
   pageIndicator: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 8, paddingVertical: 10 },
   dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#52525b' },
   dotActive: { width: 18, height: 6, borderRadius: 3, backgroundColor: '#ef4444' },
   swipeHint: { position: 'absolute', right: 20, fontSize: 10, color: '#52525b', letterSpacing: 0.5 },
 
-  // Server page
   centerCard: { flex: 1, marginHorizontal: 24, justifyContent: 'center' },
   loadingText: { color: '#52525b', fontSize: 14, textAlign: 'center' },
   pairedContainer: { flex: 1, paddingHorizontal: 22, paddingTop: 6 },
@@ -884,7 +1107,6 @@ const s = StyleSheet.create({
   progressPct: { color: '#ef4444', fontWeight: '700', fontSize: 12, marginBottom: 16 },
   downloadOverlay: { position: 'absolute', inset: 0, backgroundColor: '#0a0a0a', justifyContent: 'center', paddingHorizontal: 24 },
 
-  // Log drawer
   console: { position: 'absolute', bottom: 0, left: 0, right: 0, backgroundColor: '#111', borderTopWidth: 1, borderTopColor: '#1a1a1a', borderTopLeftRadius: 18, borderTopRightRadius: 18, maxHeight: '45%', paddingBottom: 20 },
   consoleOpen: { height: '45%' },
   consoleHandle: { alignItems: 'center', paddingVertical: 10 },
@@ -898,7 +1120,6 @@ const s = StyleSheet.create({
   log_error: { color: '#ef4444' },
   log_data: { color: '#f59e0b' },
 
-  // Client page — mode picker bar
   modePickerBar: { borderBottomWidth: 1, borderBottomColor: '#18181b', maxHeight: 120 },
   modePicker: { paddingHorizontal: 14, paddingVertical: 10, gap: 8, flexDirection: 'row', flexWrap: 'wrap' },
   modeChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11, paddingVertical: 6, borderRadius: 20, backgroundColor: '#18181b', borderWidth: 1, borderColor: '#27272a' },
@@ -911,7 +1132,6 @@ const s = StyleSheet.create({
   chipEditIcon: { fontSize: 11, color: '#3f3f46' },
   chipEditIconActive: { color: '#f59e0b' },
 
-  // Inline editor panel
   editorPanel: { backgroundColor: '#0f0f0f', borderBottomWidth: 1, borderBottomColor: '#1a1a1a', padding: 14, gap: 10 },
   editorRow: { flexDirection: 'row', gap: 10, alignItems: 'center' },
   editorIconInput: { width: 44, height: 44, backgroundColor: '#18181b', borderWidth: 1, borderColor: '#27272a', borderRadius: 10, textAlign: 'center', fontSize: 20, color: '#e4e4e7' },
@@ -924,13 +1144,11 @@ const s = StyleSheet.create({
   editorSaveBtnDisabled: { backgroundColor: '#27272a' },
   editorSaveText: { color: '#fff', fontSize: 12, fontWeight: '700', fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 
-  // Client page — empty state
   emptyChat: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
   emptyChatEmoji: { fontSize: 42, opacity: 0.2 },
   emptyChatText: { fontSize: 13, color: '#3f3f46', letterSpacing: 1 },
   emptyChatSub: { fontSize: 11, color: '#27272a', textAlign: 'center', paddingHorizontal: 40, lineHeight: 17 },
 
-  // Client page — messages
   messageList: { padding: 16, gap: 12, flexGrow: 1 },
   msgRow: { maxWidth: '84%' },
   msgRowUser: { alignSelf: 'flex-end', alignItems: 'flex-end' },
@@ -943,7 +1161,6 @@ const s = StyleSheet.create({
   cursor: { color: '#22c55e' },
   msgStats: { fontSize: 10, color: '#3f3f46', marginTop: 4, fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace' },
 
-  // Client page — input
   inputBar: { flexDirection: 'row', padding: 12, gap: 10, borderTopWidth: 1, borderTopColor: '#18181b', backgroundColor: '#0a0a0a', alignItems: 'flex-end' },
   chatInput: { flex: 1, backgroundColor: '#18181b', borderWidth: 1, borderColor: '#27272a', borderRadius: 20, paddingHorizontal: 16, paddingTop: 10, paddingBottom: 10, color: '#e4e4e7', fontSize: 14, maxHeight: 120 },
   sendBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center' },
