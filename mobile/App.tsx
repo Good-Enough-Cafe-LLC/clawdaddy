@@ -24,6 +24,7 @@ import RNFS from 'react-native-fs';
 import { sessionManager, ClientSession } from './src/session/sessionManager';
 import { estimateTokens } from './src/session/tokenEstimator';
 import { registerGlobals } from 'react-native-webrtc';
+import { GiCrabClaw, GiCrab } from "react-icons/gi";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const DEFAULT_SIGNAL_SERVER = 'https://clawdaddyswitch01.goodenoughcafe.com';
@@ -527,7 +528,7 @@ const App = () => {
                   break;
                 }
 
-                await sessionManager.identify(sessionId, clientId, logForSession);
+                await sessionManager.identify(sessionId, clientId, logForSession  );
 
                 const memory = sessionManager.getMemory(sessionId);
                 send({
@@ -819,7 +820,7 @@ const App = () => {
           {/* ── Header ── */}
           <View style={s.header}>
             <Text style={s.subtitle}>Good Enough Cafe</Text>
-            <Text style={s.logo}>🦞</Text>
+            <Text style={s.logo}><GiCrab /></Text>
             <Text style={s.title}>CLAWDADDY</Text>
             <Text style={s.subtitle}>Personal AI Node</Text>
           </View>
@@ -1086,7 +1087,7 @@ const App = () => {
               {/* ── Messages ── */}
               {messages.length === 0 ? (
                 <View style={s.emptyChat}>
-                  <Text style={s.emptyChatEmoji}>🦞</Text>
+                  <Text style={s.emptyChatEmoji}><GiCrab /></Text>
                   <Text style={s.emptyChatText}>
                     {llamaRef.current ? 'Start chatting' : 'No model loaded'}
                   </Text>

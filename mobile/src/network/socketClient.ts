@@ -89,7 +89,11 @@ export const createSocketClient = ({
 
     log('Connecting to switchboard...', 'info');
 
-    const sock = io(url, { transports: ['websocket'], reconnection: false });
+    const sock = io(url, {
+      transports: ['websocket'],
+      reconnection: false,
+      timeout: 100000,
+    });
     socket = sock;
 
     sock.on('connect', () => {

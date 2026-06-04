@@ -163,7 +163,7 @@ export default function PersonalityList({ rtc, apiHook }: Props) {
             <div
               key={m.id}
               className={`bg-bg3 border rounded mb-1.5 overflow-hidden transition-colors
-                ${isActive ? 'border-amber bg-[rgba(245,158,11,0.04)]' : 'border-border'}
+                ${isActive ? 'border-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.4)]' : 'border-border'}
                 ${m.locked ? 'opacity-70' : ''}`}
             >
               <div
@@ -178,7 +178,8 @@ export default function PersonalityList({ rtc, apiHook }: Props) {
                       : 'bg-amber opacity-50'        // active locally but not confirmed on server
                     : 'bg-muted'}`}
                 />
-                <div className="flex-1 text-[11px] text-text truncate">{m.icon} {m.name}</div>
+                {/* <div className="flex-1 text-[11px] text-text truncate">{m.icon} {m.name}</div> */}
+                <div className="flex-1 text-[11px] text-text truncate">{m.name}</div>
                 {m.locked && <span className="text-[10px] text-muted">🔒</span>}
                 {isActive && isConnected && !isSynced && (
                   <span className="text-[10px] text-amber" title="Not yet synced to server">↻</span>

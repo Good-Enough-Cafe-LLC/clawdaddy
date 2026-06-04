@@ -3,6 +3,7 @@ import { useStore } from '../store'
 import { useApiMode } from '../hooks/useApiMode'
 import { useWebRTC } from '../hooks/useWebRTC'
 import type { ClawdaddyMessage, InferenceRequest } from '@clawdaddy/core'
+import { GiCrabClaw, GiCrab } from "react-icons/gi";
 
 interface Props {
   rtc: ReturnType<typeof useWebRTC>
@@ -36,7 +37,7 @@ export default function ChatWindow({ rtc, apiHook, isMobile }: Props) {
       const spaceIdx = withoutSlash.indexOf(' ')
       const cmdName = spaceIdx === -1 ? withoutSlash : withoutSlash.slice(0, spaceIdx)
       let payload: any = spaceIdx === -1 ? undefined : withoutSlash.slice(spaceIdx + 1).trim()
-      if (payload) { try { payload = JSON.parse(payload) } catch(_) {} }
+      if (payload) { try { payload = JSON.parse(payload) } catch (_) { } }
       if (connMode === 'api') apiHook.runCommand(cmdName, payload)
       else rtc.runCommand(cmdName, payload)
       return
@@ -171,7 +172,13 @@ export default function ChatWindow({ rtc, apiHook, isMobile }: Props) {
         {messages.map(m => (
           <div key={m.id} className={`flex flex-col gap-1.5 max-w-[92vw] md:max-w-[800px] ${m.role === 'user' ? 'self-end items-end' : 'self-start items-start'}`}>
             <div className={`text-[10px] tracking-[0.12em] uppercase ${m.role === 'user' ? 'text-red' : 'text-muted'}`}>
-              {m.role === 'user' ? 'you' : '🦞 node'}
+              {m.role === 'user' ? (
+                'you'
+              ) : (
+                <span className="inline-flex items-center gap-1">
+                  <GiCrab /> node
+                </span>
+              )}
             </div>
             <div className={`px-3 md:px-4 py-2.5 md:py-3 rounded-lg text-[13px] leading-[1.7] font-sans whitespace-pre-wrap break-words
               ${m.role === 'user' ? 'bg-red text-white' : 'bg-bg2 border border-border text-text'}`}>
@@ -211,7 +218,9 @@ export default function ChatWindow({ rtc, apiHook, isMobile }: Props) {
 function EmptyState({ isMobile }: { isMobile?: boolean }) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted px-4">
-      <div className="text-[40px] md:text-[48px] opacity-30">🦞</div>
+      {/* <div className="text-[40px] md:text-[48px] opacity-30"><GiCrabClaw /></div> */}
+      <div className="text-[40px] md:text-[48px] opacity-30"><GiCrab /></div>
+
       <div className="text-[18px] md:text-[20px] tracking-[0.08em] text-center">connect to start chatting</div>
       <div className="mt-1 text-[11px] text-muted text-center max-w-[320px] leading-[1.8]">
         <div className="mb-2">chat normally, or prefix with <span className="text-blue font-mono">/cmd &lt;command&gt;</span> to send a raw command</div>

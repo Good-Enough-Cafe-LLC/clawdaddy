@@ -1,3 +1,4 @@
+import { GiCrabClaw, GiCrab } from "react-icons/gi";
 interface Props { onClose: () => void }
 
 const Cmd = ({ c }: { c: string }) => <span className="text-blue">{c}</span>
@@ -10,7 +11,9 @@ export default function HelpModal({ onClose }: Props) {
       onClick={e => e.stopPropagation()}
     >
       <div className="flex justify-between items-center mb-3">
-        <span className="font-semibold text-blue">🦞 Help</span>
+        <span className="inline-flex items-center gap-1.5 font-semibold text-blue">
+          <GiCrab /> Help
+        </span>
         <button onClick={onClose} className="text-muted hover:text-text bg-none border-none cursor-pointer text-sm">✕</button>
       </div>
 
@@ -61,8 +64,8 @@ export default function HelpModal({ onClose }: Props) {
         Something off or have an idea? Open an issue or PR on{' '}
         <a href="https://github.com/Good-Enough-Cafe-LLC/clawdaddy/issues"
           target="_blank" rel="noreferrer" className="text-blue hover:underline">GitHub</a>.
-        <br/>
-         Cooked up by Good Enough Cafe, but feel free to fork it and make it your own creation.
+        <br />
+        Cooked up by Good Enough Cafe, but feel free to fork it and make it your own creation.
       </div>
     </div>
   )

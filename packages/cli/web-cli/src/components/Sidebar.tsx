@@ -172,7 +172,7 @@ export default function Sidebar({ rtc, isMobile, onCloseSidebar }: Props) {
                   <input
                     ref={clientIdRef}
                     className={`${inputCls} focus:border-purple font-mono text-[11px]`}
-                    placeholder={`auto: ${rtc.getClientId()?.slice(0, 12) ?? '...'}...`}
+                    // placeholder={`auto: ${rtc.getClientId()?.slice(0, 12) ?? '...'}...`}
                     spellCheck={false}
                   />
                 </div>

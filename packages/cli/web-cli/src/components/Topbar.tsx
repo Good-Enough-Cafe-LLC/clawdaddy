@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { useStore, ConnMode } from '../store'
 import HelpModal from './HelpModal'
+import { GiCrabClaw, GiCrab } from "react-icons/gi";
 
 interface Props {
   onModeChange: (mode: ConnMode) => void
@@ -15,8 +16,8 @@ export default function Topbar({ onModeChange, isMobile, sidebarOpen, onToggleSi
 
   const dotClass = statusState === 'connected' ? 'bg-green shadow-[0_0_6px_#22c55e]'
     : statusState === 'connecting' ? 'bg-amber status-connecting'
-    : statusState === 'error' ? 'bg-red'
-    : 'bg-muted'
+      : statusState === 'error' ? 'bg-red'
+        : 'bg-muted'
 
   const rightText = connMode === 'api'
     ? (isPaired && activeHostId ? activeHostId : apiBase.replace('http://', ''))
@@ -30,7 +31,7 @@ export default function Topbar({ onModeChange, isMobile, sidebarOpen, onToggleSi
         style={{ gridColumn: '1 / -1' }}
       >
         {isMobile && (
-          <button 
+          <button
             onClick={onToggleSidebar}
             className="p-1.5 rounded hover:bg-white/5 text-text-dim flex-shrink-0"
             aria-label="Toggle menu"
@@ -44,8 +45,10 @@ export default function Topbar({ onModeChange, isMobile, sidebarOpen, onToggleSi
             </svg>
           </button>
         )}
-        
-        <span className="text-red font-semibold text-base md:text-lg tracking-widest font-mono whitespace-nowrap">🦞 CLAWDADDY</span>
+
+        <span className="flex items-center gap-2 text-red font-semibold text-base md:text-lg tracking-widest font-mono whitespace-nowrap">
+          <GiCrab /> CLAWDADDY
+        </span>
         <span className="text-border hidden sm:inline">/</span>
 
         <div className="flex items-center gap-2 text-xs text-text-dim tracking-wide font-mono">

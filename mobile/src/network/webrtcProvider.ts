@@ -24,7 +24,7 @@ function processChunk(frame: ChunkFrame): string | null {
     reassemblyBuffers.set(frame.id, buffer);
   }
   buffer.set(frame.index, frame.data);
-  
+
   if (buffer.size === frame.total) {
     let result = '';
     for (let i = 0; i < frame.total; i++) result += buffer.get(i);
@@ -35,9 +35,9 @@ function processChunk(frame: ChunkFrame): string | null {
 }
 
 const generateSimpleUUID = (): string => {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-    const r = Math.random() * 16 | 0;
-    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });
 };
@@ -66,12 +66,14 @@ export const createWebRTC = ({
 
   pc = new RTCPeerConnection({
     iceServers: [
+      // Fast, reliable STUN servers
+      { urls: 'stun:stun.cloudflare.com:3478' }, // Cloudflare's STUN (very fast)
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun2.l.google.com:19302' },
-      { urls: 'stun:stun3.l.google.com:19302' },
-      { urls: 'stun:stun4.l.google.com:19302' },
     ],
+    iceCandidatePoolSize: 5, // Reduce from default to speed up
+    bundlePolicy: 'max-bundle', // Bundle media streams (faster)
+    rtcpMuxPolicy: 'require', // Reduce ports needed
   });
 
   // Send ICE candidates
@@ -95,30 +97,30 @@ export const createWebRTC = ({
   // Handle incoming data channel
   pc.addEventListener('datachannel', (event: any) => {
     const channel = event.channel;
-    
+
     channel.onopen = () => {
       if (!isConnected && !isClosed) {
         isConnected = true;
         onOpen();
       }
     };
-    
+
     channel.onclose = () => {
       if (isConnected && !isClosed) {
         isConnected = false;
         onClose();
       }
     };
-    
+
     channel.onerror = (error: any) => {
       log(`Data channel error: ${error.message}`, 'error');
     };
-    
+
     channel.onmessage = (event: any) => {
       try {
         const raw = event.data.toString();
         const parsed = JSON.parse(raw);
-        
+
         if (parsed.id && typeof parsed.index === 'number') {
           const serialised = processChunk(parsed);
           if (!serialised) return;
@@ -145,7 +147,7 @@ export const createWebRTC = ({
         log(`Message error: ${e}`, 'error');
       }
     };
-    
+
     dataChannel = channel;
   });
 
@@ -173,14 +175,14 @@ export const createWebRTC = ({
       log('Cannot send: data channel not ready', 'error');
       return;
     }
-    
+
     try {
       const signature = computeHMAC(sharedKey, packet);
       const securePacket = { payload: packet, signature };
       const serialised = JSON.stringify(securePacket);
       const id = generateSimpleUUID();
       const total = Math.ceil(serialised.length / CHUNK_SIZE);
-      
+
       for (let i = 0; i < total; i++) {
         const frame = {
           id,
@@ -199,10 +201,14 @@ export const createWebRTC = ({
     if (isClosed) return;
     isClosed = true;
     if (dataChannel) {
-      try { dataChannel.close(); } catch (_) {}
+      try {
+        dataChannel.close();
+      } catch (_) {}
     }
     if (pc) {
-      try { pc.close(); } catch (_) {}
+      try {
+        pc.close();
+      } catch (_) {}
     }
     isConnected = false;
   };
